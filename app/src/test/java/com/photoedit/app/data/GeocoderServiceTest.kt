@@ -28,6 +28,31 @@ class GeocoderServiceTest {
         val svc = PhotonGeocoder(throwing(), fake(nominati))
         assertEquals(1, svc.search("x").size)
     }
+
+    /**
+     * Task 14 冒烟回归：Photon 只认 default/de/en/fr，`lang=zh` 直接 HTTP 400
+     * （真实请求实测），搜索与反查会双双失效 → 断言 URL 不带 zh。
+     */
+    @Test fun photonUrlsDoNotUseUnsupportedZhLang() = runBlocking {
+        val urls = mutableListOf<String>()
+        val svc = PhotonGeocoder(recording(emptyResult, urls))
+        svc.search("外滩")
+        svc.reverse(31.2, 121.5)
+        assertEquals(2, urls.size)
+        urls.forEach { url ->
+            org.junit.Assert.assertTrue("Photon URL 不应带 lang=zh: $url", !url.contains("lang=zh"))
+            org.junit.Assert.assertTrue("Photon URL 应带受支持的 lang: $url", url.contains("lang=default"))
+        }
+        org.junit.Assert.assertTrue(urls[0].startsWith("https://photon.komoot.io/api/"))
+        org.junit.Assert.assertTrue(urls[1].startsWith("https://photon.komoot.io/reverse?"))
+    }
+
     private fun fake(body: String) = object : HttpFetcher { override fun get(url: String) = body }
     private fun throwing() = object : HttpFetcher { override fun get(url: String): String = throw java.io.IOException("net") }
+    private fun recording(body: String, sink: MutableList<String>) = object : HttpFetcher {
+        override fun get(url: String): String {
+            sink += url
+            return body
+        }
+    }
 }

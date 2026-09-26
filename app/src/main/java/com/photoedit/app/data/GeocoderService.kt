@@ -55,7 +55,7 @@ fun interface Sleeper {
 
 /**
  * Photon (komoot) 为主的地理编码，Nominatim 兜底。
- * - 搜索：Photon `/api/?lang=zh&q=..`，GeoJSON FeatureCollection；空结果或任何异常 → Nominatim `search`（jsonv2）。
+ * - 搜索：Photon `/api/?lang=default&q=..`，GeoJSON FeatureCollection；空结果或任何异常 → Nominatim `search`（jsonv2）。
  * - 反查：Photon `/reverse`，同样空/异常 → Nominatim `reverse`；仍失败返回 null。
  * - Nominatim 礼貌策略：Mutex 串行 + 相邻两次请求间隔 ≥1.1s（首次立即发）；UA 由 [OkHttpFetcher] 携带。
  * - [fallback] 为 null 时不发 Nominatim 请求。
@@ -158,9 +158,18 @@ class PhotonGeocoder(
     }
 
     companion object {
-        internal fun photonSearchUrl(q: String) = "https://photon.komoot.io/api/?lang=zh&q=$q"
+        /**
+         * Photon 只接受 `default/de/en/fr`：传 `zh` 会被回 **HTTP 400**
+         * （`{"lang":[{"message":"Language is not supported..."}]}`，Task 14 冒烟实测），
+         * 中文查询用 `default`（返回 OSM 本地名，即中文）；`en` 会把地名罗马化。
+         * Nominatim 侧的 `accept-language=zh` 不受此限。
+         */
+        internal const val PHOTON_LANG = "default"
+
+        internal fun photonSearchUrl(q: String) =
+            "https://photon.komoot.io/api/?lang=$PHOTON_LANG&q=$q"
         internal fun photonReverseUrl(lat: Double, lon: Double) =
-            "https://photon.komoot.io/reverse?lat=$lat&lon=$lon&lang=zh"
+            "https://photon.komoot.io/reverse?lat=$lat&lon=$lon&lang=$PHOTON_LANG"
         internal fun nominatimSearchUrl(q: String) =
             "https://nominatim.openstreetmap.org/search?q=$q&format=jsonv2&accept-language=zh&limit=8"
         internal fun nominatimReverseUrl(lat: Double, lon: Double) =
