@@ -3,6 +3,10 @@
 
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- MediaStoreWriter: existingNames 去重 / displayNameOf / Live 配对查询需相册读权限
+         （picker 单张授权不覆盖全库查询） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
     <application
         android:allowBackup="true"
