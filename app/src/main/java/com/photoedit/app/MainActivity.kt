@@ -19,6 +19,7 @@ import androidx.core.content.IntentCompat
 import com.photoedit.app.ui.edit.EditScreen
 import com.photoedit.app.ui.edit.EditViewModel
 import com.photoedit.app.ui.entry.EntryScreen
+import com.photoedit.app.ui.resolveCanonicalMediaUri
 import com.photoedit.app.ui.theme.PhotoEditTheme
 import kotlinx.coroutines.launch
 
@@ -63,7 +64,14 @@ class MainActivity : ComponentActivity() {
                 } else {
                     null
                 }
-                if (uri != null) editViewModel.load(uri) else toastUnsupportedShare()
+                if (uri != null) {
+                    // Task14a 缺陷 1：分享 EXTRA_STREAM 若已是 images/media/<id> 归一后走覆盖；
+                    // file uri / 归一失败则只读降级（覆盖入口禁用，spec §3.5/§4）
+                    val canonical = resolveCanonicalMediaUri(this, uri)
+                    editViewModel.load(canonical.uri, canonical.canOverwrite)
+                } else {
+                    toastUnsupportedShare()
+                }
                 true
             }
 
@@ -101,7 +109,7 @@ private fun AppNav(viewModel: EditViewModel) {
         if (result.resultCode == Activity.RESULT_OK) viewModel.overwriteOriginal()
     }
     if (state == null) {
-        EntryScreen(onPickUri = { uri -> viewModel.load(uri) })
+        EntryScreen(onPick = { canonical -> viewModel.load(canonical.uri, canonical.canOverwrite) })
     } else {
         EditScreen(
             vm = viewModel,

@@ -96,6 +96,13 @@ class EditViewModel(
     private val _saveState = MutableStateFlow<SaveState>(SaveState.Idle)
     val saveState: StateFlow<SaveState> = _saveState.asStateFlow()
 
+    /**
+     * 当前来源能否走"覆盖原图"（Task14a 缺陷 1）：Photo Picker/分享的只读、非规范 uri
+     * 归一失败时为 false——编辑与另存副本照常，覆盖入口禁用（spec §3.5/§4：不静默失败）。
+     */
+    private val _overwriteSupported = MutableStateFlow(true)
+    val overwriteSupported: StateFlow<Boolean> = _overwriteSupported.asStateFlow()
+
     /** 一次性错误提示事件（非法经纬度等）；无重放，晚订阅者不会收到陈旧提示。 */
     private val _events = MutableSharedFlow<String>(
         extraBufferCapacity = 8,
@@ -110,9 +117,10 @@ class EditViewModel(
 
     // region load
 
-    fun load(uri: Uri) {
+    fun load(uri: Uri, canOverwrite: Boolean = true) {
         // 无重放守卫（评审 B 的 intent 消费已覆盖）；迟到结果靠 loadedUri 会话核对丢弃
         loadedUri = uri
+        _overwriteSupported.value = canOverwrite
         _state.value = EditState.Loading
         _saveState.value = SaveState.Idle
         viewModelScope.launch {
@@ -140,6 +148,7 @@ class EditViewModel(
     /** 回到入口页（放弃当前编辑会话）。 */
     fun reset() {
         loadedUri = null
+        _overwriteSupported.value = true
         _state.value = null
         _saveState.value = SaveState.Idle
     }
@@ -257,6 +266,11 @@ class EditViewModel(
     fun overwriteOriginal() {
         val ready = readyOrNull() ?: return
         val uri = loadedUri ?: return
+        // Task14a 缺陷 1：来源不可覆盖（picker/分享只读 uri 归一失败）时不发起，就地给文案
+        if (!_overwriteSupported.value) {
+            setResultInSession(uri, SaveState.Failed(OVERWRITE_UNSUPPORTED_MSG))
+            return
+        }
         if (!startWorking()) return
         viewModelScope.launch {
             try {
@@ -371,6 +385,7 @@ class EditViewModel(
 
     companion object {
         private const val FALLBACK_NAME = "photo.jpg"
+        private const val OVERWRITE_UNSUPPORTED_MSG = "该来源无法覆盖原图，请用另存为副本"
         private const val GPS_TOLERANCE = 0.001 // ≈111 m，覆盖 Float 精度 + DMS 有理化损耗
         private const val RATIONAL_TOLERANCE = 0.001 // 覆盖 /10000 有理化与十进制往返损耗
 

@@ -48,6 +48,7 @@ private val IosWarning = Color(0xFFFF9500)
 fun SaveSheet(vm: EditViewModel, onDismiss: () -> Unit) {
     val state by vm.state.collectAsState()
     val saveState by vm.saveState.collectAsState()
+    val overwriteSupported by vm.overwriteSupported.collectAsState()
     val ready = state as? EditState.Ready
     val working = saveState is SaveState.Working
 
@@ -81,11 +82,22 @@ fun SaveSheet(vm: EditViewModel, onDismiss: () -> Unit) {
             HorizontalDivider(color = IosSeparator)
             SaveOptionRow(
                 title = "覆盖原图",
-                subtitle = "需要系统确认",
+                subtitle = if (overwriteSupported) "需要系统确认" else "该来源不支持覆盖",
                 highlighted = false,
-                enabled = !working,
+                enabled = !working && overwriteSupported,
                 onClick = { vm.overwriteOriginal() },
             )
+
+            // Task14a 缺陷 1：只读来源（picker/分享 uri 归一失败）优雅降级——就地给文案，
+            // 引导"另存为副本"，不静默失败（spec §3.5/§4）。
+            if (!overwriteSupported) {
+                Text(
+                    "该来源无法覆盖原图，请用另存为副本",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = IosSecondaryLabel,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
 
             if (working) {
                 LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))

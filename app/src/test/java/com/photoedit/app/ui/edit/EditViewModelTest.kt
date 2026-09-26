@@ -559,6 +559,35 @@ class EditViewModelTest {
         assertEquals(uri, writer.lastOverwriteUri)
     }
 
+    // ---- Task14a 缺陷 1：只读来源不可覆盖，就地 Failed 文案，不触达 writer ----
+
+    @Test
+    fun `canOverwrite 为 false 时 overwrite 直接 Failed 且不触达 writer`() = runTest {
+        val writer = FakeWriter()
+        val vm = viewModel(writer = writer)
+        vm.load(uri, canOverwrite = false)
+        assertEquals(false, vm.overwriteSupported.value)
+        vm.setIso(500)
+        vm.overwriteOriginal()
+        assertEquals(0, writer.overwriteCount)
+        assertTrue(vm.saveState.value is SaveState.Failed)
+    }
+
+    @Test
+    fun `canOverwrite 默认为 true 且 load 会重置上次的覆盖可用性`() = runTest {
+        val writer = FakeWriter().apply { overwriteOutcome = SaveOutcome.NeedsPermission }
+        val vm = viewModel(writer = writer)
+        vm.load(uri) // 默认可覆盖
+        assertEquals(true, vm.overwriteSupported.value)
+        vm.load(uri2, canOverwrite = false) // 换到只读来源
+        assertEquals(false, vm.overwriteSupported.value)
+        vm.setIso(600)
+        vm.overwriteOriginal()
+        assertTrue(vm.saveState.value is SaveState.Failed)
+        vm.reset() // 回入口重置为默认可覆盖
+        assertEquals(true, vm.overwriteSupported.value)
+    }
+
     @Test
     fun `overwrite 成功 DoneSaved 且授权重试可再次发起`() = runTest {
         val writer = FakeWriter()
