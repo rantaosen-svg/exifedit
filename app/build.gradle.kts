@@ -27,6 +27,11 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        // Task 12：JVM 单测需要 android.net.Uri/ContextWrapper 等桩类可实例化（返回默认值而非抛 not-mocked）
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -43,6 +48,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test:2.1.0")
+    // 与 coroutines-android 1.9.0 版本对齐（控制器裁定允许新增的测试依赖）
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

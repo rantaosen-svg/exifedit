@@ -24,13 +24,15 @@ sealed interface SaveOutcome {
  * - overwrite：先直写，app 不拥有条目时捕获 RecoverableSecurityException 返回 NeedsPermission，
  *   调用方经 [createWriteIntentFor] 发起系统授权后重试一次。
  * - 零存储权限（spec §1/§3.4 修订）：双文件型 Live 图副本为静态图，不复制配对 mp4。
+ *
+ * open：EditViewModel 构造注入以便 JVM 测试子类化 fake（公开方法均 open）。
  */
-class MediaStoreWriter(private val context: Context) {
+open class MediaStoreWriter(private val context: Context) {
 
     private val resolver get() = context.contentResolver
 
     /** 按 uri 反查 DISPLAY_NAME；条目已不存在或不可读时 null。 */
-    suspend fun displayNameOf(uri: Uri): String? = withContext(Dispatchers.IO) {
+    open suspend fun displayNameOf(uri: Uri): String? = withContext(Dispatchers.IO) {
         runCatching {
             resolver.query(
                 uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null,
@@ -46,7 +48,7 @@ class MediaStoreWriter(private val context: Context) {
      * 真正的重名安全网在系统层：insert 遇到同目录重复 DISPLAY_NAME 时 MediaProvider
      * 自动追加 " (1)" 后缀，不会产生冲突或覆盖。
      */
-    suspend fun existingNames(): Set<String> = withContext(Dispatchers.IO) {
+    open suspend fun existingNames(): Set<String> = withContext(Dispatchers.IO) {
         val names = HashSet<String>()
         runCatching {
             resolver.query(
@@ -59,7 +61,7 @@ class MediaStoreWriter(private val context: Context) {
     }
 
     /** 另存副本：插入 Pictures/ 下新 JPEG 条目并写入字节；失败清理半成品。 */
-    suspend fun saveCopy(bytes: ByteArray, newName: String, dateTakenMillis: Long): SaveOutcome =
+    open suspend fun saveCopy(bytes: ByteArray, newName: String, dateTakenMillis: Long): SaveOutcome =
         insertEntry(
             collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             displayName = newName,
@@ -74,7 +76,7 @@ class MediaStoreWriter(private val context: Context) {
      * 不拥有时 openOutputStream/write 抛 RecoverableSecurityException → NeedsPermission
      * （调用方 launch [createWriteIntentFor] 授权后重试一次）。文件名不变，Live 配对天然保持。
      */
-    suspend fun overwrite(uri: Uri, bytes: ByteArray): SaveOutcome = withContext(Dispatchers.IO) {
+    open suspend fun overwrite(uri: Uri, bytes: ByteArray): SaveOutcome = withContext(Dispatchers.IO) {
         try {
             val stream = resolver.openOutputStream(uri, "w")
                 ?: return@withContext SaveOutcome.Failed("无法打开输出流：条目可能已不存在")
@@ -96,7 +98,7 @@ class MediaStoreWriter(private val context: Context) {
      * MediaStore.createWriteRequest 返回系统授权用的 PendingIntent
      * （内部即 IntentSender 封装，调用方 startIntentSenderForResult 后重试 overwrite 一次）。
      */
-    suspend fun createWriteIntentFor(uri: Uri): PendingIntent? = withContext(Dispatchers.IO) {
+    open suspend fun createWriteIntentFor(uri: Uri): PendingIntent? = withContext(Dispatchers.IO) {
         if (Build.VERSION.SDK_INT < 30) return@withContext null
         runCatching { MediaStore.createWriteRequest(resolver, listOf(uri)) }.getOrNull()
     }

@@ -23,8 +23,10 @@ import kotlin.math.roundToLong
  * 注：androidx.exifinterface 1.3.7 无 saveAttributes(OutputStream)/deleteAttribute 公开 API
  * （1.4.2 亦无），故落盘走临时文件 + 字节级删除器；Orientation/Make 等未改标签依赖
  * saveAttributes 的保留行为，由仪器测试断言。
+ *
+ * open：EditViewModel 构造注入以便 JVM 测试子类化 fake（read/write 均 open）。
  */
-class ExifRepository {
+open class ExifRepository {
 
     sealed interface Read {
         data class Success(val bytes: ByteArray, val metadata: PhotoMetadata, val isMotionPhoto: Boolean) : Read
@@ -32,7 +34,7 @@ class ExifRepository {
         data class IoError(val message: String) : Read
     }
 
-    fun read(bytes: ByteArray): Read {
+    open fun read(bytes: ByteArray): Read {
         if (!isJpeg(bytes)) return Read.UnsupportedFormat
         val isMotion = safe { MotionPhotoCodec.split(bytes) != null } == true
         return try {
@@ -47,7 +49,7 @@ class ExifRepository {
      * 按 original→edited 差异重写 EXIF；未列入 changedFields 的字段一律不触碰。
      * 无法处理时（非 JPEG / 写失败 / 删除器解析失败）原样返回输入字节，绝不产出半损坏文件。
      */
-    fun write(bytes: ByteArray, original: PhotoMetadata, edited: PhotoMetadata): ByteArray {
+    open fun write(bytes: ByteArray, original: PhotoMetadata, edited: PhotoMetadata): ByteArray {
         if (!isJpeg(bytes)) return bytes
         val split = safe { MotionPhotoCodec.split(bytes) }
         val photo = split?.photo ?: bytes
