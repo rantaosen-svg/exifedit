@@ -13,6 +13,7 @@ import com.photoedit.app.domain.GpsCoordinates
 import com.photoedit.app.domain.MetadataField
 import com.photoedit.app.domain.PhotoMetadata
 import com.photoedit.app.domain.changedFields
+import java.io.IOException
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.Collections
@@ -144,7 +145,18 @@ class EditViewModelTest {
     private class FakeGeocoder(var place: GeoPlace? = null) : GeocoderService {
         var reverseCalls = 0
         var onReverse: () -> Unit = {}
-        override suspend fun search(query: String): List<GeoPlace> = emptyList()
+        var searchCalls = 0
+        var lastQuery: String? = null
+        var searchResult: List<GeoPlace> = emptyList()
+        var searchError: Exception? = null
+
+        override suspend fun search(query: String): List<GeoPlace> {
+            searchCalls++
+            lastQuery = query
+            searchError?.let { throw it }
+            return searchResult
+        }
+
         override suspend fun reverse(lat: Double, lon: Double): GeoPlace? {
             reverseCalls++
             onReverse() // 供"反查在途时用户继续编辑"的测试注入并发操作
@@ -316,6 +328,66 @@ class EditViewModelTest {
         val ready = vm.state.value as EditState.Ready
         assertEquals(null, ready.edited.gps)
         assertEquals(null, ready.edited.placeName)
+    }
+
+    // ---- 地名反查去重（Task 14：面板只调 setGps，不再自行 reverse） ----
+
+    @Test
+    fun `已有地名时 setGps 不再反查 不覆盖用户输入`() = runTest {
+        val geocoder = FakeGeocoder(GeoPlace("外滩, 上海市", 31.2, 121.4))
+        val vm = viewModel(geocoder = geocoder)
+        vm.load(uri)
+        vm.setPlaceName("我自己起的名")
+        vm.setGps(31.2, 121.4)
+        assertEquals(0, geocoder.reverseCalls)
+        assertEquals("我自己起的名", (vm.state.value as EditState.Ready).edited.placeName)
+    }
+
+    // ---- searchPlaces（Task 14：搜索经 VM，UI 不持有 Geocoder） ----
+
+    @Test
+    fun `searchPlaces 去首尾空白后委托 geocoder 并返回结果`() = runTest {
+        val places = listOf(GeoPlace("外滩, 上海市", 31.2397, 121.49))
+        val geocoder = FakeGeocoder().apply { searchResult = places }
+        val vm = viewModel(geocoder = geocoder)
+        assertEquals(places, vm.searchPlaces("  外滩  "))
+        assertEquals("外滩", geocoder.lastQuery)
+        assertEquals(1, geocoder.searchCalls)
+    }
+
+    @Test
+    fun `searchPlaces 空白查询不发请求`() = runTest {
+        val geocoder = FakeGeocoder()
+        val vm = viewModel(geocoder = geocoder)
+        assertEquals(emptyList(), vm.searchPlaces(""))
+        assertEquals(emptyList(), vm.searchPlaces("   \n "))
+        assertEquals(0, geocoder.searchCalls)
+    }
+
+    @Test
+    fun `searchPlaces geocoder 抛异常时返回空列表 不影响编辑状态`() = runTest {
+        val geocoder = FakeGeocoder().apply { searchError = IOException("离线") }
+        val vm = viewModel(geocoder = geocoder)
+        vm.load(uri)
+        val before = vm.state.value
+        assertEquals(emptyList(), vm.searchPlaces("外滩"))
+        assertSame(before, vm.state.value) // 纯查询：不触碰状态机
+    }
+
+    @Test
+    fun `searchPlaces 未加载图片时也可用且不创建状态`() = runTest {
+        val places = listOf(GeoPlace("外滩", 31.2, 121.4))
+        val vm = viewModel(geocoder = FakeGeocoder().apply { searchResult = places })
+        assertEquals(places, vm.searchPlaces("外滩"))
+        assertEquals(null, vm.state.value)
+    }
+
+    @Test
+    fun `reportIssue 经 events 发出一次性提示`() = runTest {
+        val vm = viewModel()
+        val events = collectEvents(vm)
+        vm.reportIssue("无法获取当前定位")
+        assertEquals(listOf("无法获取当前定位"), events)
     }
 
     // ---- saveAsCopy ----

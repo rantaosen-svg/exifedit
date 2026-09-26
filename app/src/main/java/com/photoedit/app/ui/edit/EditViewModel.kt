@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.photoedit.app.data.ExifRepository
+import com.photoedit.app.data.GeoPlace
 import com.photoedit.app.data.GeocoderService
 import com.photoedit.app.data.MediaStoreWriter
 import com.photoedit.app.data.OkHttpFetcher
@@ -191,6 +192,36 @@ class EditViewModel(
                 }
             }
         }
+    }
+
+    // endregion
+
+    // region 地点搜索（spec §3.3）
+
+    /**
+     * 地点搜索：委托 [GeocoderService.search]，UI 不直接持有 geocoder。
+     * 空/全空白 query 不发请求；任何异常（离线、超时、解析失败）吞掉后返回空列表——
+     * 由地点面板把"无结果"就地降级为"可改用手动经纬度"，不阻塞保存。
+     *
+     * 反查地名不在此列：[setGps] 已内建带会话守卫的反查回填，面板只需调 [setGps]，
+     * 再发一次 reverse 会是重复请求。
+     */
+    suspend fun searchPlaces(query: String): List<GeoPlace> {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        return try {
+            geocoder.search(trimmed)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * UI 侧一次性提示通道：只有 UI 才知道的失败（定位超时 / 权限被拒）走与非法输入
+     * 相同的 [events] snackbar，避免为一条文案再开一条状态流。
+     */
+    fun reportIssue(msg: String) {
+        _events.tryEmit(msg)
     }
 
     // endregion
