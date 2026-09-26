@@ -2,7 +2,6 @@ package com.photoedit.app.data
 
 import android.app.PendingIntent
 import android.content.ContentUris
-import android.content.ContentValues
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.ParcelFileDescriptor
@@ -14,7 +13,6 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -23,8 +21,10 @@ import java.io.ByteArrayOutputStream
 import java.util.UUID
 
 /**
- * 仪器测试（真机会话）：MediaStoreWriter 的副本插入 / 覆盖 / 写授权 / Live 同名 mp4 配对。
- * 所有插入条目 @After 自行清理；外部所有权场景尽力构造，构造不出则 assume 跳过并在报告注明。
+ * 仪器测试（真机会话）：MediaStoreWriter 的副本插入 / 覆盖 / 写授权。
+ * 零存储权限（spec §1/§3.4 修订）：不声明也不授予 READ_MEDIA_*，
+ * MediaStore 查询仅见本 app 自有条目；不测外部条目枚举与 Live 双文件配对（功能已删）。
+ * 所有插入条目 @After 自行清理；外部所有权场景尽力构造，构造不出则跳过并在报告注明。
  */
 @RunWith(AndroidJUnit4::class)
 class MediaStoreWriterTest {
@@ -38,14 +38,8 @@ class MediaStoreWriterTest {
         get() = InstrumentationRegistry.getInstrumentation().targetContext.contentResolver
 
     @Before fun setUp() {
-        val instr = InstrumentationRegistry.getInstrumentation()
-        writer = MediaStoreWriter(instr.targetContext)
-        // 跨属主 MediaStore 查询（existingNames/配对/外部条目）需相册读权限；
-        // connected 渠道不会自动 grant manifest 运行时权限，这里显式授予（幂等）。
-        val pkg = instr.targetContext.packageName
-        for (p in listOf("android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO")) {
-            runCatching { instr.uiAutomation.grantRuntimePermission(pkg, p) }
-        }
+        // 零权限运行：刻意不 grantRuntimePermission——验证默认（无 READ_MEDIA_*）行为。
+        writer = MediaStoreWriter(InstrumentationRegistry.getInstrumentation().targetContext)
     }
 
     @After fun tearDown() {
@@ -64,12 +58,6 @@ class MediaStoreWriterTest {
         assertTrue(bmp.compress(Bitmap.CompressFormat.JPEG, 90, out))
         return out.toByteArray()
     }
-
-    private fun fakeMp4(): ByteArray =
-        ByteArray(128).also {
-            it[4] = 'f'.code.toByte(); it[5] = 't'.code.toByte()
-            it[6] = 'y'.code.toByte(); it[7] = 'p'.code.toByte()
-        }
 
     private fun readBack(uri: Uri): ByteArray =
         resolver.openInputStream(uri)!!.use { it.readBytes() }
@@ -90,20 +78,6 @@ class MediaStoreWriterTest {
             arrayOf(MediaStore.Images.Media._ID),
             "${MediaStore.Images.Media.DISPLAY_NAME} = ?", arrayOf(name), null,
         )?.use { if (it.moveToFirst()) ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, it.getLong(0)) else null }
-
-    private fun insertVideoDirect(name: String, bytes: ByteArray): Uri {
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, name)
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Pictures/")
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.IS_PENDING, 1)
-        }
-        val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)!!
-        inserted += uri
-        resolver.openOutputStream(uri, "w")!!.use { it.write(bytes) }
-        resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
-        return uri
-    }
 
     private fun shell(cmd: String): String {
         val pfd = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(cmd)
@@ -164,13 +138,16 @@ class MediaStoreWriterTest {
 
     @Test fun existingNamesContainsSavedNameAndDisplayNameOfRoundTrips() {
         runBlocking {
+            // 零权限语义：existingNames 只能枚举本 app 自有条目——
+            // 断言"至少含刚 saveCopy 的名字"（自有可见），不断言能看到外部文件；
+            // 外部重名的最终安全网是 MediaStore insert 自动追加 " (1)"。
             val name = "PE_T10_names_$tag.jpg"
             val saved = writer.saveCopy(jpeg(), name, System.currentTimeMillis())
             assertTrue(saved is SaveOutcome.Saved)
             val uri = (saved as SaveOutcome.Saved).uri
             inserted += uri
 
-            assertTrue("existingNames missing $name", writer.existingNames().contains(name))
+            assertTrue("existingNames missing own entry $name", writer.existingNames().contains(name))
             assertEquals(name, writer.displayNameOf(uri))
             assertEquals(name, uriForImageName(name)?.let { writer.displayNameOf(it) })
         }
@@ -234,46 +211,6 @@ class MediaStoreWriterTest {
             val intent = writer.createWriteIntentFor(uri!!)
             assertNotNull("NeedsPermission 但 createWriteIntentFor 为 null", intent)
             assertNotNull(intent!!.intentSender)
-        }
-    }
-
-    // ---- 4. Live 双文件配对 ----
-
-    @Test fun findPairedVideoUriMatchesSameBaseAndRelativePath() {
-        runBlocking {
-            val base = "IMG_T10_pair_$tag"
-            val imgUri = (writer.saveCopy(jpeg(), "$base.jpg", System.currentTimeMillis()) as SaveOutcome.Saved).uri
-            inserted += imgUri
-            val videoBytes = fakeMp4()
-            val videoUri = insertVideoDirect("$base.mp4", videoBytes)
-
-            val paired = writer.findPairedVideoUri(imgUri)
-            assertNotNull("同名 $base.mp4 应配对成功", paired)
-            assertEquals("$base.mp4", writer.displayNameOf(paired!!))
-            assertArrayEquals(videoBytes, readBack(paired))
-
-            // 副本改名后复制：新条目存在、字节一致
-            val copy = writer.copyPairedVideo(paired, "${base}_副本")
-            assertTrue("expected Saved, got $copy", copy is SaveOutcome.Saved)
-            val copyUri = (copy as SaveOutcome.Saved).uri
-            inserted += copyUri
-            assertEquals("${base}_副本.mp4", writer.displayNameOf(copyUri))
-            assertArrayEquals(videoBytes, readBack(copyUri))
-
-            // 视频改名后与图片不再同名 → null
-            resolver.update(videoUri, ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, "${base}_x.mp4")
-            }, null, null)
-            assertNull(writer.findPairedVideoUri(imgUri))
-        }
-    }
-
-    @Test fun findPairedVideoUriReturnsNullWithoutVideo() {
-        runBlocking {
-            val saved = writer.saveCopy(jpeg(), "IMG_T10_alone_$tag.jpg", System.currentTimeMillis())
-            val imgUri = (saved as SaveOutcome.Saved).uri
-            inserted += imgUri
-            assertNull(writer.findPairedVideoUri(imgUri))
         }
     }
 }

@@ -2,7 +2,6 @@ package com.photoedit.app.data
 
 import android.app.PendingIntent
 import android.app.RecoverableSecurityException
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
@@ -23,8 +22,8 @@ sealed interface SaveOutcome {
  * MediaStore 写回（spec §3.5）：
  * - saveCopy：IS_PENDING 事务式插入 `Pictures/`，写流失败即删条目，绝不留半成品；
  * - overwrite：先直写，app 不拥有条目时捕获 RecoverableSecurityException 返回 NeedsPermission，
- *   调用方经 [createWriteIntentFor] 发起系统授权后重试一次；
- * - Live 双文件（同名 jpg+mp4）：[findPairedVideoUri] 定位配对 mp4，[copyPairedVideo] 副本同名复制。
+ *   调用方经 [createWriteIntentFor] 发起系统授权后重试一次。
+ * - 零存储权限（spec §1/§3.4 修订）：双文件型 Live 图副本为静态图，不复制配对 mp4。
  */
 class MediaStoreWriter(private val context: Context) {
 
@@ -39,7 +38,14 @@ class MediaStoreWriter(private val context: Context) {
         }.getOrNull()
     }
 
-    /** 全量图片 DISPLAY_NAME 集合，供 CopyNaming.next 去重递增。 */
+    /**
+     * 已占用 DISPLAY_NAME 集合，供 CopyNaming.next 去重递增。
+     *
+     * 零权限语义（spec §1/§3.4 修订）：API 33+ 无 READ_MEDIA_* 时 MediaStore 查询仅返回
+     * 本 app 自有条目，看不到外部相册文件——去重因此是"尽力"而非完备。
+     * 真正的重名安全网在系统层：insert 遇到同目录重复 DISPLAY_NAME 时 MediaProvider
+     * 自动追加 " (1)" 后缀，不会产生冲突或覆盖。
+     */
     suspend fun existingNames(): Set<String> = withContext(Dispatchers.IO) {
         val names = HashSet<String>()
         runCatching {
@@ -93,48 +99,6 @@ class MediaStoreWriter(private val context: Context) {
     suspend fun createWriteIntentFor(uri: Uri): PendingIntent? = withContext(Dispatchers.IO) {
         if (Build.VERSION.SDK_INT < 30) return@withContext null
         runCatching { MediaStore.createWriteRequest(resolver, listOf(uri)) }.getOrNull()
-    }
-
-    /**
-     * Live 双文件配对：取图片 DISPLAY_NAME 去扩展名为 base，
-     * 在同 RELATIVE_PATH 目录下查 `<base>.mp4` 视频条目；无则 null。
-     */
-    suspend fun findPairedVideoUri(uri: Uri): Uri? = withContext(Dispatchers.IO) {
-        val name = displayNameOf(uri) ?: return@withContext null
-        val base = name.substringBeforeLast('.')
-        val relPath = queryString(uri, MediaStore.MediaColumns.RELATIVE_PATH)
-        val selection = StringBuilder("${MediaStore.Video.Media.DISPLAY_NAME} = ?")
-        val args = mutableListOf("$base.mp4")
-        if (relPath != null) {
-            selection.append(" AND ${MediaStore.Video.Media.RELATIVE_PATH} = ?")
-            args += relPath
-        }
-        runCatching {
-            resolver.query(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                arrayOf(MediaStore.Video.Media._ID),
-                selection.toString(), args.toTypedArray(), null,
-            )?.use {
-                if (it.moveToFirst())
-                    ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, it.getLong(0))
-                else null
-            }
-        }.getOrNull()
-    }
-
-    /** 另存副本时同步复制配对 mp4：同 RELATIVE_PATH，命名 `<newBaseName>.mp4`。 */
-    suspend fun copyPairedVideo(videoUri: Uri, newBaseName: String): SaveOutcome = withContext(Dispatchers.IO) {
-        val bytes = runCatching {
-            resolver.openInputStream(videoUri)?.use { it.readBytes() }
-        }.getOrNull() ?: return@withContext SaveOutcome.Failed("无法读取配对视频")
-        insertEntry(
-            collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            displayName = "$newBaseName$VIDEO_EXT",
-            mimeType = MIME_MP4,
-            bytes = bytes,
-            relativePath = queryString(videoUri, MediaStore.MediaColumns.RELATIVE_PATH) ?: RELATIVE_PATH_PICTURES,
-            dateTakenMillis = queryLong(videoUri, DATE_TAKEN_COLUMN),
-        )
     }
 
     // ---- internal ----
@@ -191,12 +155,6 @@ class MediaStoreWriter(private val context: Context) {
         }
     }.getOrNull()
 
-    private fun queryLong(uri: Uri, column: String): Long? = runCatching {
-        resolver.query(uri, arrayOf(column), null, null, null)?.use {
-            if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null
-        }
-    }.getOrNull()
-
     /** MediaProvider 在部分 fuse 路径把权限错误压成裸 IOException——查 owner 包名兜底判定。 */
     private fun uriIsForeign(uri: Uri): Boolean = runCatching {
         val owner = queryString(uri, MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
@@ -205,8 +163,6 @@ class MediaStoreWriter(private val context: Context) {
 
     companion object {
         private const val MIME_JPEG = "image/jpeg"
-        private const val MIME_MP4 = "video/mp4"
-        private const val VIDEO_EXT = ".mp4"
         private const val RELATIVE_PATH_PICTURES = "Pictures/"
         private const val DATE_TAKEN_COLUMN = MediaStore.Images.ImageColumns.DATE_TAKEN // "datetaken"
     }
