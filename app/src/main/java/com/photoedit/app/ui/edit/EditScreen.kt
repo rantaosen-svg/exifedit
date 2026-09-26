@@ -120,6 +120,9 @@ fun EditScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showSaveSheet by remember { mutableStateOf(false) }
     var showLocationSheet by remember { mutableStateOf(false) }
+    // Task14a 缺陷 2：系统授权弹窗至多自动发起一次——remember 按 uri 会话作用域，切图重置。
+    var permissionAutoConsumed by remember(vm.currentUri) { mutableStateOf(false) }
+    var previousSaveState by remember(vm.currentUri) { mutableStateOf<SaveState>(SaveState.Idle) }
     // 定位的权限 launcher + 取位协程挂在本页作用域：系统授权弹窗打断地点面板时结果不丢
     val locationRequester = rememberLocationRequester(vm) { showLocationSheet = false }
 
@@ -138,12 +141,18 @@ fun EditScreen(
 
             is SaveState.NeedsOverwritePermission -> {
                 showSaveSheet = true // 面板内展示"改为另存副本"一键路径
-                onLaunchOverwritePermission() // 拉起系统写授权，OK 后 AppNav 重试 overwrite
+                // 只在 Working→NOP 的一次跃变且本会话未自动发起过时拉起系统写授权，避免
+                // NOP→Working→NOP 重入循环 / 配置变更后重复弹窗；其余靠面板显式动作兜底。
+                if (shouldRelaunchOverwritePermission(previousSaveState, s, permissionAutoConsumed)) {
+                    permissionAutoConsumed = true
+                    onLaunchOverwritePermission() // 拉起系统写授权，OK 后 AppNav 重试 overwrite
+                }
             }
 
             is SaveState.Failed -> snackbarHostState.showSnackbar(s.reason)
             else -> Unit
         }
+        previousSaveState = saveState
     }
 
     Scaffold(
