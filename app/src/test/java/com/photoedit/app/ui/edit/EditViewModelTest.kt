@@ -10,18 +10,24 @@ import com.photoedit.app.data.GeoPlace
 import com.photoedit.app.data.MediaStoreWriter
 import com.photoedit.app.data.SaveOutcome
 import com.photoedit.app.domain.GpsCoordinates
+import com.photoedit.app.domain.MetadataField
 import com.photoedit.app.domain.PhotoMetadata
+import com.photoedit.app.domain.changedFields
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.Collections
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
+import kotlin.test.assertNotSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -37,28 +43,59 @@ class EditViewModelTest {
 
     // ---- fakes ----
 
+    /** 字节内容作 map key（contentEquals/contentHashCode）。 */
+    private class BytesKey(private val bytes: ByteArray) {
+        override fun equals(other: Any?): Boolean = other is BytesKey && bytes.contentEquals(other.bytes)
+        override fun hashCode(): Int = bytes.contentHashCode()
+    }
+
     /**
-     * read 分两相：写入过 → 返回 writtenMetadata（模拟"写成功且重读命中"）；
-     * 未写入 → 返回 loadResult（load 用）。simulateSilentFailure 复刻真 repo
-     * "写失败原样返回输入字节"：write 不更新 writtenMetadata，重读仍是旧值。
+     * 字节感知 fake（复刻真 ExifRepository 的关键契约）：
+     * - read 只返回字节流"实际携带"的元数据（registry 按内容查），与哪次 write 无关；
+     * - write 只把 changedFields(original, edited) 打到输入 bytes 上：以输入字节流的现有
+     *   元数据为底、覆盖 changed 命中的字段，产出一条新字节流（尾部加盖修订号字节以示重写）；
+     * - simulateSilentFailure 复刻真 repo"写失败原样返回输入字节（同一引用）"的静默路径。
      */
     private open class FakeRepo(
         var loadResult: ExifRepository.Read = ExifRepository.Read.UnsupportedFormat,
     ) : ExifRepository() {
-        var writtenMetadata: PhotoMetadata? = null
+        private val registry = HashMap<BytesKey, PhotoMetadata>()
         var simulateSilentFailure = false
         var writeCalls = 0
         var lastWriteArgs: Triple<ByteArray, PhotoMetadata, PhotoMetadata>? = null
+        var lastWritten: ByteArray? = null
+
+        init {
+            (loadResult as? ExifRepository.Read.Success)?.let { registry[BytesKey(it.bytes)] = it.metadata }
+        }
 
         override fun read(bytes: ByteArray): ExifRepository.Read =
-            writtenMetadata?.let { ExifRepository.Read.Success(bytes, it, isMotionPhoto = false) }
+            registry[BytesKey(bytes)]?.let { ExifRepository.Read.Success(bytes, it, isMotionPhoto = false) }
                 ?: loadResult
 
         override fun write(bytes: ByteArray, original: PhotoMetadata, edited: PhotoMetadata): ByteArray {
             writeCalls++
             lastWriteArgs = Triple(bytes, original, edited)
-            if (!simulateSilentFailure) writtenMetadata = edited
-            return bytes
+            if (simulateSilentFailure) return bytes // 真契约：失败返回同一引用，字节内容不变
+            val base = registry[BytesKey(bytes)] ?: original
+            val merged = mergeChanged(base, edited, changedFields(original, edited))
+            val out = bytes + writeCalls.toByte()
+            registry[BytesKey(out)] = merged
+            lastWritten = out
+            return out
+        }
+
+        /** 只覆盖 changed 命中的 EXIF 字段，其余保留底流原值（placeName 非 EXIF，不参与）。 */
+        private fun mergeChanged(base: PhotoMetadata, edited: PhotoMetadata, changed: Set<MetadataField>): PhotoMetadata {
+            var m = base
+            if (MetadataField.TAKEN_AT in changed) m = m.copy(takenAt = edited.takenAt)
+            if (MetadataField.GPS in changed) m = m.copy(gps = edited.gps)
+            if (MetadataField.MODEL in changed) m = m.copy(model = edited.model)
+            if (MetadataField.F_NUMBER in changed) m = m.copy(fNumber = edited.fNumber)
+            if (MetadataField.SHUTTER in changed) m = m.copy(shutterSeconds = edited.shutterSeconds)
+            if (MetadataField.ISO in changed) m = m.copy(iso = edited.iso)
+            if (MetadataField.FOCAL in changed) m = m.copy(focalLengthMm = edited.focalLengthMm)
+            return m
         }
     }
 
@@ -98,9 +135,11 @@ class EditViewModelTest {
 
     private class FakeGeocoder(var place: GeoPlace? = null) : GeocoderService {
         var reverseCalls = 0
+        var onReverse: () -> Unit = {}
         override suspend fun search(query: String): List<GeoPlace> = emptyList()
         override suspend fun reverse(lat: Double, lon: Double): GeoPlace? {
             reverseCalls++
+            onReverse() // 供"反查在途时用户继续编辑"的测试注入并发操作
             return place
         }
     }
@@ -109,6 +148,7 @@ class EditViewModelTest {
 
     private val jpegBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0x01, 0x02)
     private val uri = FakeUri("content://media/external/images/media/7")
+    private val uri2 = FakeUri("content://media/external/images/media/8")
 
     private val baseMeta = PhotoMetadata(
         takenAt = LocalDateTime.of(2024, 5, 1, 12, 0, 0),
@@ -125,7 +165,8 @@ class EditViewModelTest {
         writer: MediaStoreWriter = FakeWriter(),
         geocoder: GeocoderService = FakeGeocoder(),
         readBytes: (Uri) -> ByteArray = { jpegBytes },
-    ) = EditViewModel(repo, writer, geocoder, readBytes)
+        io: CoroutineDispatcher = UnconfinedTestDispatcher(), // 同步执行 IO，保持既有断言时序
+    ) = EditViewModel(repo, writer, geocoder, readBytes, io)
 
     /** 收集 events（SharedFlow 无 replay，需先挂订阅）。 */
     private fun kotlinx.coroutines.test.TestScope.collectEvents(vm: EditViewModel): List<String> {
@@ -171,6 +212,16 @@ class EditViewModelTest {
         assertEquals(baseMeta, ready.edited)
         assertEquals(false, ready.isMotionPhoto)
         assertEquals(SaveState.Idle, vm.saveState.value)
+    }
+
+    @Test
+    fun `load 的全文件 IO 跑在注入的 io 调度器上 未完成前保持 Loading`() = runTest {
+        val io = StandardTestDispatcher(testScheduler) // 与 Unconfined 的 Main 相对：需推进调度器才执行 IO 段
+        val vm = viewModel(io = io)
+        vm.load(uri)
+        assertEquals(EditState.Loading, vm.state.value) // IO 尚未被调度 → 还没悄悄在 Main 上跑完
+        advanceUntilIdle()
+        assertTrue(vm.state.value is EditState.Ready)
     }
 
     // ---- 编辑不改 original ----
@@ -236,6 +287,20 @@ class EditViewModelTest {
     }
 
     @Test
+    fun `反查地名返回时坐标已被改动 陈旧回填被丢弃`() = runTest {
+        lateinit var vm: EditViewModel
+        val geocoder = FakeGeocoder(GeoPlace("外滩", 31.2, 121.4)).apply {
+            onReverse = { vm.clearGps() } // 反查在途时用户清空坐标
+        }
+        vm = viewModel(geocoder = geocoder)
+        vm.load(uri)
+        vm.setGps(31.2, 121.4)
+        val ready = vm.state.value as EditState.Ready
+        assertEquals(null, ready.edited.gps)
+        assertEquals(null, ready.edited.placeName) // 陈旧地名不复活
+    }
+
+    @Test
     fun `clearGps 清空坐标与地名`() = runTest {
         val vm = viewModel(repo = readyRepo(baseMeta.copy(gps = GpsCoordinates(1.0, 2.0), placeName = "somewhere")))
         vm.load(uri)
@@ -261,7 +326,7 @@ class EditViewModelTest {
 
         assertEquals("photo_副本2.jpg", writer.lastCopyName)
         assertEquals(SaveState.DoneSaved(FakeWriter.savedUri), vm.saveState.value)
-        assertTrue(writer.lastCopyBytes === jpegBytes) // 传给 saveCopy 的正是 write 的产物
+        assertSame(repo.lastWritten, writer.lastCopyBytes) // 传给 saveCopy 的正是 write 的产物
         val expectedMillis = baseMeta.takenAt!!.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         assertEquals(expectedMillis, writer.lastCopyDateTaken) // datetaken 列同步写编辑后时间
     }
@@ -280,9 +345,74 @@ class EditViewModelTest {
         vm.setModel("B")
         vm.saveAsCopy()
         val (_, originalArg, editedArg) = repo.lastWriteArgs!!
-        assertEquals("A", originalArg.model) // 第二次写以"已保存"为基线
+        assertEquals("A", originalArg.model) // 第二次写以"已存"为基线
         assertEquals("B", editedArg.model)
         assertEquals(SaveState.DoneSaved(FakeWriter.savedUri), vm.saveState.value)
+    }
+
+    @Test
+    fun `连续两次保存 第二轮写入不得回退第一轮已保存字段`() = runTest {
+        val repo = readyRepo()
+        val writer = FakeWriter()
+        val vm = viewModel(repo = repo, writer = writer)
+        vm.load(uri)
+
+        vm.setModel("iPhone 16")
+        vm.saveAsCopy()
+        val first = repo.lastWritten!!
+        assertSame(first, (vm.state.value as EditState.Ready).bytes) // #1: bytes 随保存前移
+
+        vm.setIso(640)
+        vm.saveAsCopy()
+        assertSame(first, repo.lastWriteArgs!!.first) // 第二轮 write 的输入是第一轮产物
+        val second = repo.lastWritten!!
+        assertNotSame(first, second)
+        // 最终落盘字节流必须同时含新 model 与新 iso（旧实现红：stale bytes + diff-only write
+        // 用第一轮旧 model 覆盖回去 → spec §4 静默丢数据）
+        val finalMeta = (repo.read(second) as ExifRepository.Read.Success).metadata
+        assertEquals("iPhone 16", finalMeta.model)
+        assertEquals(640, finalMeta.iso)
+    }
+
+    @Test
+    fun `保存窗口内的继续编辑不被完成回写吞掉`() = runTest {
+        val repo = readyRepo()
+        lateinit var vm: EditViewModel
+        val writer = FakeWriter().apply {
+            saveCopyOutcome = {
+                vm.setModel("在途编辑") // MediaStore 往返期间用户继续编辑
+                SaveOutcome.Saved(FakeWriter.savedUri)
+            }
+        }
+        vm = viewModel(repo = repo, writer = writer)
+        vm.load(uri)
+        vm.setModel("A")
+        vm.saveAsCopy()
+        val ready = vm.state.value as EditState.Ready
+        assertEquals("在途编辑", ready.edited.model) // 在途编辑保留（旧实现红：陈旧快照回写吞掉）
+        assertEquals("A", ready.original.model) // 基线只前移到本轮真正写入的内容
+        assertSame(repo.lastWritten, ready.bytes)
+    }
+
+    @Test
+    fun `保存中途切换到新图片 旧会话完成不复活旧状态`() = runTest {
+        val repo = readyRepo()
+        lateinit var vm: EditViewModel
+        val writer = FakeWriter().apply {
+            saveCopyOutcome = {
+                vm.load(uri2) // 保存往返期间用户切图（load 同步完成为新会话 Ready）
+                SaveOutcome.Saved(FakeWriter.savedUri)
+            }
+        }
+        vm = viewModel(repo = repo, writer = writer)
+        vm.load(uri)
+        vm.setModel("A")
+        vm.saveAsCopy()
+        val ready = vm.state.value as EditState.Ready
+        assertEquals(baseMeta, ready.original) // 新会话基线 = 新读取结果（旧实现红：旧会话状态复活）
+        assertEquals("Pixel 8", ready.edited.model) // "A" 属于已放弃的旧会话
+        assertSame(jpegBytes, ready.bytes)
+        assertEquals(SaveState.Idle, vm.saveState.value) // 旧会话的 DoneSaved 不污染新会话
     }
 
     @Test
@@ -299,16 +429,31 @@ class EditViewModelTest {
     }
 
     @Test
-    fun `write 静默失败被重读校验兜底为 Failed`() = runTest {
+    fun `write 静默失败（同引用）被识别为 Failed 且基线与 bytes 不前移`() = runTest {
         val repo = readyRepo().apply { simulateSilentFailure = true }
         val vm = viewModel(repo = repo, writer = FakeWriter())
         vm.load(uri)
         vm.setTakenAt(LocalDateTime.of(2030, 1, 1, 0, 0, 0))
         vm.saveAsCopy()
         val failed = vm.saveState.value as SaveState.Failed
-        assertContains(failed.reason, "拍摄时间未写入")
-        // original 不前移（校验失败 = 未保存成功）
-        assertEquals(baseMeta, (vm.state.value as EditState.Ready).original)
+        assertContains(failed.reason, "原始字节") // write 失败契约：返回输入同一引用
+        val ready = vm.state.value as EditState.Ready
+        assertEquals(baseMeta, ready.original) // 校验失败 = 未保存成功，基线不前移
+        assertSame(jpegBytes, ready.bytes)
+    }
+
+    @Test
+    fun `只改 ISO 且 write 静默失败 判 Failed 且基线不前移`() = runTest {
+        val repo = readyRepo().apply { simulateSilentFailure = true }
+        val vm = viewModel(repo = repo, writer = FakeWriter())
+        vm.load(uri)
+        vm.setIso(800)
+        vm.saveAsCopy()
+        // 旧实现红：固定三字段子集校验对"只改 ISO"恒过 → 假 DoneSaved + 基线前移
+        assertTrue(vm.saveState.value is SaveState.Failed)
+        val ready = vm.state.value as EditState.Ready
+        assertEquals(baseMeta, ready.original)
+        assertSame(jpegBytes, ready.bytes)
     }
 
     // ---- overwriteOriginal ----
@@ -341,6 +486,22 @@ class EditViewModelTest {
         assertEquals(SaveState.DoneSaved(FakeWriter.savedUri), vm.saveState.value)
         assertEquals("C", (vm.state.value as EditState.Ready).original.model)
         assertEquals(2, writer.overwriteCount)
+    }
+
+    @Test
+    fun `overwrite 成功后 bytes 前移 连续保存不回退字段`() = runTest {
+        val repo = readyRepo()
+        val writer = FakeWriter()
+        val vm = viewModel(repo = repo, writer = writer)
+        vm.load(uri)
+        vm.setModel("Z")
+        vm.overwriteOriginal()
+        assertSame(repo.lastWritten, (vm.state.value as EditState.Ready).bytes) // saveAsCopy 与 overwrite 两条路径都要前移
+        vm.setIso(320)
+        vm.overwriteOriginal()
+        val finalMeta = (repo.read(repo.lastWritten!!) as ExifRepository.Read.Success).metadata
+        assertEquals("Z", finalMeta.model)
+        assertEquals(320, finalMeta.iso)
     }
 
     @Test
