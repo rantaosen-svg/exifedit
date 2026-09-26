@@ -246,7 +246,7 @@ internal fun rememberLocationRequester(vm: EditViewModel, onLocated: () -> Unit)
 private fun CurrentPlaceHeader(placeName: String?, gps: GpsCoordinates?) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         Text(
-            placeName ?: if (gps != null) "已设坐标·地名待获取" else "未设置地点",
+            placeName ?: if (gps != null) EditViewModel.PENDING_PLACE_LABEL else "未设置地点",
             style = MaterialTheme.typography.titleMedium,
         )
         if (gps != null) {

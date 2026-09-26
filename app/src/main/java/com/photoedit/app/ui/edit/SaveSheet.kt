@@ -40,8 +40,11 @@ private val IosWarning = Color(0xFFFF9500)
  * - NeedsOverwritePermission：EditScreen 拉起系统授权对话框的同时，面板保持打开并
  *   就地给出"授权被拒绝，可改为另存副本" + 一键 [EditViewModel.saveAsCopy]
  *   （覆盖路径的完整语义 = 面板内联兜底，不依赖用户是否注意到 snackbar）。
- * - 动态照片黄条仅对**检测到的内嵌型**（isMotionPhoto）显示；双文件型无法检测、
- *   副本为静态图属 spec §3.4 已知限制，不在此文案范围。
+ * - 动态照片黄条仅对**检测到的内嵌型**（isMotionPhoto）显示："覆盖与另存副本都保留动效"。
+ * - 双文件型 Live 图（同名 jpg+mp4）与无法识别的厂商私有变体在零权限下**不可检测**
+ *   （spec §3.4 修订），因此面板对**所有照片**恒显一条通用、非检测式黄条：告知
+ *   "若存在同名 .mp4 配对，另存副本将是静态照片；覆盖原图不受影响"——同一文案覆盖
+ *   私有变体"动效可能丢失"的告知义务（评审 Important#2：不再承诺不可达的检测式明示）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,22 +58,16 @@ fun SaveSheet(vm: EditViewModel, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = IosSurface) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
             if (ready?.isMotionPhoto == true) {
-                Box(
-                    Modifier
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(IosWarning)
-                        .padding(12.dp),
-                ) {
-                    Text(
-                        "动态照片：覆盖与另存副本都将保留动效",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF3A2A00),
-                    )
-                }
+                WarningBanner("动态照片：覆盖与另存副本都将保留动效")
                 Spacer(Modifier.height(8.dp))
             }
+            // 通用非检测式告知（Important#2）：双文件型 Live 图 / 私有变体零权限下不可
+            // 识别，无法做"命中才提示"，故对所有照片恒显同一提示（spec §3.4 修订口径）。
+            WarningBanner(
+                "若该照片在相册中存在同名 .mp4 配对（部分品牌 Live 图），" +
+                    "另存副本将是静态照片；覆盖原图不受影响",
+            )
+            Spacer(Modifier.height(8.dp))
 
             SaveOptionRow(
                 title = "另存为副本",
@@ -121,6 +118,24 @@ fun SaveSheet(vm: EditViewModel, onDismiss: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun WarningBanner(text: String) {
+    Box(
+        Modifier
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(IosWarning)
+            .padding(12.dp),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF3A2A00),
+        )
     }
 }
 

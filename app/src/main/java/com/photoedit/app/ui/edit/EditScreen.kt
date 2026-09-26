@@ -406,7 +406,7 @@ private fun PlaceCard(placeName: String?, gps: GpsCoordinates?, onEdit: () -> Un
     Column(Modifier.iosCard()) {
         CardRow(
             title = "拍摄地点",
-            value = placeName ?: if (gps != null) "已设坐标·地名待获取" else "未设置",
+            value = placeName ?: if (gps != null) EditViewModel.PENDING_PLACE_LABEL else "未设置",
             secondary = gps?.let { String.format(Locale.US, "%.5f, %.5f", it.latitude, it.longitude) },
             onClick = onEdit,
         )
@@ -422,6 +422,26 @@ private fun CameraInfoCard(sessionKey: Uri?, edited: PhotoMetadata, vm: EditView
     Column(Modifier.iosCard()) {
         Text("相机信息", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(12.dp))
+        // spec §3.2：显示 Make、可改 Model——Make 只读回显（无编辑诉求），null 显"未设置"。
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "制造商",
+                style = MaterialTheme.typography.bodyMedium,
+                color = IosSecondaryLabel,
+                modifier = Modifier.width(64.dp),
+            )
+            Text(
+                edited.make ?: "未设置",
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (edited.make == null) IosSecondaryLabel else MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.End,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Spacer(Modifier.height(4.dp))
         OutlinedTextField(
             value = modelText,
             onValueChange = {

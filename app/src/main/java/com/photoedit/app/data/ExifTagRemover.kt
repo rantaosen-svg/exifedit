@@ -44,8 +44,14 @@ internal object ExifTagRemover {
     private const val MAX_DIRS = 64
     private const val TAG_INTEROP_POINTER = 0xA005
 
-    /** TIFF 字段类型 → 单字节宽度；索引即 type 号，0=未知（未知一律不清零，保守）。 */
-    private val TYPE_SIZES = intArrayOf(0, 1, 1, 2, 4, 8, 4, 1, 8, 4, 8, 4, 8)
+    /**
+     * TIFF 字段类型 → 单字节宽度；索引即 type 号，0=未知（未知一律不清零，保守）。
+     * Minor③ 修正：旧表 SBYTE(6)=4、SSHORT(8)=8 均为错值（BYTE 系宽度只看类型，
+     * SBYTE=1、SSHORT=2），会把外置值块算大 → 与存活区间假重叠 → 该清的残留不清，
+     * 或越界判定失真。逐位对应：1 BYTE/2 ASCII=1，3 SHORT=2，4 LONG=4，5 RATIONAL=8，
+     * 6 SBYTE=1，7 UNDEFINED=1，8 SSHORT=2，9 SLONG=4，10 SRATIONAL=8，11 FLOAT=4，12 DOUBLE=8。
+     */
+    private val TYPE_SIZES = intArrayOf(0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8)
 
     /** [start, endExclusive) 的绝对下标区间 */
     private class Range(val start: Int, val end: Int) {

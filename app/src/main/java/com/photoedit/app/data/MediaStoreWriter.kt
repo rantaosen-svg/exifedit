@@ -19,10 +19,29 @@ sealed interface SaveOutcome {
 }
 
 /**
+ * 覆盖前 OWNER_PACKAGE_NAME 判定的三态（Important#3）。
+ * [OwnerCheck.Foreign] 是唯一可"不打开流直接按需授权"的确定性信号。
+ */
+internal enum class OwnerCheck { Own, Foreign, Unknown }
+
+/**
+ * owner 判定纯函数（JVM 可测）：查询结果 null（零权限下外部行不可见 / 列缺失 / 查询失败）
+ * 一律 [OwnerCheck.Unknown]——维持直写尝试路径，由异常分类兜底；
+ * 已知且非本包 = [OwnerCheck.Foreign]。
+ */
+internal fun classifyOwnerCheck(owner: String?, packageName: String): OwnerCheck = when {
+    owner == null -> OwnerCheck.Unknown
+    owner == packageName -> OwnerCheck.Own
+    else -> OwnerCheck.Foreign
+}
+
+/**
  * MediaStore 写回（spec §3.5）：
  * - saveCopy：IS_PENDING 事务式插入 `Pictures/`，写流失败即删条目，绝不留半成品；
  * - overwrite：先直写，app 不拥有条目时捕获 RecoverableSecurityException 返回 NeedsPermission，
  *   调用方经 [createWriteIntentFor] 发起系统授权后重试一次。
+ *   Important#3：打开输出流即截断原文件，故写入前先查 OWNER_PACKAGE_NAME——已知外部属主
+ *   的条目在**打开任何流之前**直接 NeedsPermission，消除对外部文件的截断窗口。
  * - 零存储权限（spec §1/§3.4 修订）：双文件型 Live 图副本为静态图，不复制配对 mp4。
  *
  * open：EditViewModel 构造注入以便 JVM 测试子类化 fake（公开方法均 open）。
@@ -75,8 +94,12 @@ open class MediaStoreWriter(private val context: Context) {
      * 覆盖原图：uri 反查条目直写。app 拥有的文件直接 Saved；
      * 不拥有时 openOutputStream/write 抛 RecoverableSecurityException → NeedsPermission
      * （调用方 launch [createWriteIntentFor] 授权后重试一次）。文件名不变，Live 配对天然保持。
+     * Important#3：openOutputStream("w") **打开即截断**——先查 OWNER_PACKAGE_NAME，
+     * 已知且非本包的条目在打开流之前直接 NeedsPermission（外部文件零截断窗口）；
+     * 查询失败 / owner 为 null（零权限下外部行本就查不到）维持现路径，不改变既有行为。
      */
     open suspend fun overwrite(uri: Uri, bytes: ByteArray): SaveOutcome = withContext(Dispatchers.IO) {
+        if (ownerCheckOf(uri) == OwnerCheck.Foreign) return@withContext SaveOutcome.NeedsPermission
         try {
             val stream = resolver.openOutputStream(uri, "w")
                 ?: return@withContext SaveOutcome.Failed("无法打开输出流：条目可能已不存在")
@@ -157,11 +180,12 @@ open class MediaStoreWriter(private val context: Context) {
         }
     }.getOrNull()
 
+    /** OWNER_PACKAGE_NAME 查询 + 纯函数判定（Important#3：判定逻辑 JVM 可测，见 [classifyOwnerCheck]）。 */
+    private fun ownerCheckOf(uri: Uri): OwnerCheck =
+        classifyOwnerCheck(queryString(uri, MediaStore.MediaColumns.OWNER_PACKAGE_NAME), context.packageName)
+
     /** MediaProvider 在部分 fuse 路径把权限错误压成裸 IOException——查 owner 包名兜底判定。 */
-    private fun uriIsForeign(uri: Uri): Boolean = runCatching {
-        val owner = queryString(uri, MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
-        owner != null && owner != context.packageName
-    }.getOrDefault(false)
+    private fun uriIsForeign(uri: Uri): Boolean = ownerCheckOf(uri) == OwnerCheck.Foreign
 
     companion object {
         private const val MIME_JPEG = "image/jpeg"

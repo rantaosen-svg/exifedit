@@ -257,4 +257,39 @@ class ExifTagRemoverTest {
         // 存活 Copyright 引用的块未被清零
         for (i in dataOff until dataOff + 64) assertEquals("byte $i", 'C'.code.toByte(), t[i])
     }
+
+    // ---- Minor#3：TYPE_SIZES 表 SBYTE=1、SSHORT=2（旧表 4/8 把外置块算大） ----
+
+    @Test fun sbyteAndSshortEntriesUseCorrectFieldWidthsForScrubbing() {
+        // 布局 D：紧邻排布 SBYTE(type 6, count 8 → 8 字节) 与 SSHORT(type 8, count 5 → 10 字节)
+        // 两个外置块。删前者 → 必须精确清零 8 字节且不动后者。
+        // 旧表（SBYTE=4→32 字节、SSHORT=8→40 字节）下：被删块区间假性覆盖存活块 →
+        // 重叠保护放弃清零（隐私残留），存活块区间也虚胖——本用例在旧实现下必红。
+        val dataA = 8 + 2 + 2 * 12 + 4 // 38：SBYTE 块起点
+        val dataB = dataA + 8 // 46：SSHORT 块起点（与 A 紧邻）
+        val blockA = ByteArray(8) { 'A'.code.toByte() }
+        val blockB = ByteArray(10) { 'B'.code.toByte() }
+        val tiffD = u16(0x4949) + u16(42) + u32(8) +
+            ifd(listOf(
+                entry(0x0148, 6, 8, dataA), // BYTE(-ish) 私有标签位：SBYTE×8
+                entry(0x0149, 8, 5, dataB), // SSHORT×5
+            )) + blockA + blockB
+        val jpegD = byteArrayOf(0xFF.toByte(), 0xD8.toByte()) +
+            byteArrayOf(0xFF.toByte(), 0xE1.toByte()) + u16(tiffD.size + 6 + 2) +
+            "Exif\u0000\u0000".toByteArray(Charsets.ISO_8859_1) + tiffD +
+            byteArrayOf(0xFF.toByte(), 0xD9.toByte())
+
+        val out = ExifTagRemover.remove(jpegD, ifd0Tags = setOf(0x0148))!!
+        assertEquals(jpegD.size, out.size) // 长度不变原则
+        val t = out.copyOfRange(12, 12 + tiffD.size)
+        // 被删条目外置块按真实宽度（1×8=8 字节）精确清零
+        for (i in dataA until dataB) assertEquals("scrub $i", 0, t[i].toInt())
+        // 存活 SSHORT 块一分不动（旧表算成 40 字节 → 重叠 → 连 A 块都不敢清）
+        assertArrayEquals(blockB, t.copyOfRange(dataB, dataB + 10))
+        // 目录条目删除正确：只剩 0x0149
+        val ifd0 = parseDir(t, 8)
+        assertEquals(1, ifd0.count)
+        assertEquals(0x0149, ifd0.entries[0].first)
+        assertEquals(dataB.toLong(), ifd0.entries[0].second)
+    }
 }

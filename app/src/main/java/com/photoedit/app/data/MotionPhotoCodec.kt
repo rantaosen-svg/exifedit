@@ -1,6 +1,9 @@
 package com.photoedit.app.data
 
+import android.util.Log
+
 object MotionPhotoCodec {
+    private const val TAG = "MotionPhotoCodec"
     data class Split(val photo: ByteArray, val video: ByteArray)
     private val MICRO = Regex("""MicroVideoOffset="(\d+)"""")
     private val ITEM = Regex("""Offset="(\d+)"\s+Length="(\d+)"\s+Id="MotionPhoto_Data"""")
@@ -42,12 +45,24 @@ object MotionPhotoCodec {
         val delta = rebuiltPhoto.size - photo.size
         if (delta == 0) return rebuiltPhoto + video
         // 只修正 XMP APP1（payload 以 xap 命名空间开头的那个 0xFFE1 段）的段长；
-        // 定位失败或修正后长度越界 → 整体放弃，返回原 photo+video 拼接，不产损坏文件
-        val lenPos = findXmpApp1LengthFieldPos(rebuiltPhoto) ?: return photo + video
+        // 定位失败或修正后长度越界 → 整体放弃，返回原 photo+video 拼接。
+        // Minor⑤（如实说明，旧注释"不产损坏文件"言过其实）：放弃路径下 XMP 声明的
+        // 偏移/段长与真实字节可能不再自洽——JPEG 本体仍可解码、不动调用方原字节，
+        // 但严格解析器可能拒载或丢动效。此处只留告警日志便于真机排障。
+        val lenPos = findXmpApp1LengthFieldPos(rebuiltPhoto)
+        if (lenPos == null) {
+            Log.w(TAG, "motion photo rebuild aborted: XMP APP1 segment not found;" +
+                " XMP offsets may be stale (animation may be lost on strict viewers)")
+            return photo + video
+        }
         val oldLen = ((rebuiltPhoto[lenPos].toInt() and 0xFF) shl 8) or (rebuiltPhoto[lenPos + 1].toInt() and 0xFF)
         val newLen = oldLen + delta
         val segmentStart = lenPos - 2 // marker 0xFFE1 的起始
-        if (newLen < 2 || newLen > 0xFFFF || segmentStart + 2 + newLen > rebuiltPhoto.size) return photo + video
+        if (newLen < 2 || newLen > 0xFFFF || segmentStart + 2 + newLen > rebuiltPhoto.size) {
+            Log.w(TAG, "motion photo rebuild aborted: corrected XMP segment length out of range" +
+                " (oldLen=$oldLen delta=$delta); XMP offsets may be stale (animation may be lost)")
+            return photo + video
+        }
         val header = rebuiltPhoto.copyOf()
         header[lenPos] = (newLen shr 8).toByte()
         header[lenPos + 1] = (newLen and 0xFF).toByte()

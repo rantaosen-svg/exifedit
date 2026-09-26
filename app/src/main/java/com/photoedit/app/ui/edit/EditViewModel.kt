@@ -71,6 +71,9 @@ sealed interface SaveState {
  *   最坏只是一次冗余读取；读取完成前核对 [loadedUri] 会话标识，迟到的旧结果直接丢弃。
  * - 非法输入（如越界经纬度）不回写状态，只经 [events] 发一条错误提示（选型：
  *   MutableSharedFlow(extraBufferCapacity=8, DROP_OLDEST)，无 replay，避免重建后重放旧提示）。
+ * - 保存发起统一前置校验（Important#1）：repo.write 返回输入同一引用（静默失败契约）
+ *   且本轮确有字段变更时，直接 Failed，**不触 writer**——另存副本不会先插入相册再
+ *   事后校验留下未编辑的垃圾 `原名_副本.jpg`，覆盖不会打开输出流造成截断窗口。
  * - 保存成功统一回写（[onSaved]）：先做重读校验，通过后基于**当前** state 做 copy——
  *   bytes 前移到 write 产物、original 前移到本轮快照的 edited，保存窗口内的在途编辑
  *   保留在 edited 中。bytes 必须与 original 同步前移：repo.write 是 diff-only（只把
@@ -211,7 +214,7 @@ class EditViewModel(
 
     fun setTakenAt(dt: LocalDateTime) = edit { it.copy(takenAt = dt) }
 
-    fun setModel(v: String) = edit { it.copy(model = v) }
+    fun setModel(v: String) = edit { it.copy(model = v.ifBlank { null }) }
 
     fun setFNumber(v: Double) = edit { it.copy(fNumber = v) }
 
@@ -294,6 +297,12 @@ class EditViewModel(
         viewModelScope.launch {
             try {
                 val written = withContext(ioDispatcher) { repo.write(ready.bytes, ready.original, ready.edited) }
+                // Important#1：静默失败（write 原样返回输入字节）在**触达 writer 之前**拦截——
+                // 绝不先 saveCopy 插入相册再事后校验报失败（那会留下未编辑的垃圾 `原名_副本.jpg`）。
+                silentWriteFailure(ready, written)?.let {
+                    setResultInSession(uri, SaveState.Failed(it))
+                    return@launch
+                }
                 // Important#3：命名走**授权读 uri**（loadedUri）——它带 picker/分享读授权，
                 // DISPLAY_NAME 查得到真名；writeUri 无读权限、file/第三方来源更查不到，
                 // 故 canOverwrite=false 时副本名仍为 `原名_副本`（不回归数字 id）。
@@ -325,6 +334,12 @@ class EditViewModel(
         viewModelScope.launch {
             try {
                 val written = withContext(ioDispatcher) { repo.write(ready.bytes, ready.original, ready.edited) }
+                // Important#1（同一防线）：静默失败时在 openOutputStream 截断之前中止，
+                // 不用原始字节做无意义的截断重写，也不给事后校验留马后炮。
+                silentWriteFailure(ready, written)?.let {
+                    setResultInSession(session, SaveState.Failed(it))
+                    return@launch
+                }
                 // Critical#1：写只走规范 writeUri（原始 picker/分享授权 uri 覆盖必失败）
                 when (val outcome = writer.overwrite(loadedWriteUri ?: session, written)) {
                     is SaveOutcome.Saved -> onSaved(session, ready, written, outcome.uri)
@@ -401,9 +416,24 @@ class EditViewModel(
     }
 
     /**
+     * Important#1：write 静默失败的前置判定（在触达 writer 之前）。
+     * 真 repo.write 的失败契约是"原样返回输入字节（同一引用）"——本轮确有字段变更而
+     * written === 输入 bytes 即判失败：另存副本不 saveCopy（相册不留垃圾 `原名_副本`），
+     * 覆盖不开输出流（不产生截断窗口）。onSaved 的重读校验仍保留同一判定作双保险。
+     */
+    private fun silentWriteFailure(snapshot: EditState.Ready, written: ByteArray): String? =
+        if (written === snapshot.bytes &&
+            changedFields(snapshot.original, snapshot.edited).isNotEmpty()
+        ) {
+            WRITE_SILENT_FAILURE_MSG
+        } else {
+            null
+        }
+
+    /**
      * 重读校验（评审 #3），两层：
-     * 1) 廉价精确信号：真 repo.write 的失败契约是"原样返回输入字节（同一引用）"——
-     *    本轮确有字段变更而 written === 输入 bytes 时直接判 Failed，不依赖字段碰运气；
+     * 1) 廉价精确信号：write 静默失败（同一引用 + 本轮确有变更）——正常已被
+     *    [silentWriteFailure] 前置拦截，这里是双保险；
      * 2) 字段级：按本轮 changedFields(original, edited) **逐项**验证 written 重读值命中
      *    edited（时间截秒、GPS 千分度容差、有理数字段 1e-3 容差），而非固定三字段子集——
      *    只改 ISO 时同样能发现 ISO 没落盘。
@@ -412,7 +442,7 @@ class EditViewModel(
         val expected = snapshot.edited
         val changed = changedFields(snapshot.original, expected)
         if (changed.isEmpty()) return null
-        if (written === snapshot.bytes) return "保存后校验失败：写入返回原始字节（EXIF 未被修改）"
+        silentWriteFailure(snapshot, written)?.let { return it }
         return when (val read = repo.read(written)) {
             is ExifRepository.Read.Success -> mismatchOf(read.metadata, expected, changed)
             else -> "保存后校验失败：无法重读已保存文件"
@@ -455,6 +485,12 @@ class EditViewModel(
          * 不可覆盖来源的统一文案（评审 #7：唯一定义处，SaveSheet/VM 共用，不再两处字面量）。
          */
         internal const val OVERWRITE_UNSUPPORTED_MSG = "该来源无法覆盖原图，请用另存为副本"
+
+        /** write 静默失败（返回输入同一引用）的前置拦截文案（Important#1）。 */
+        internal const val WRITE_SILENT_FAILURE_MSG = "保存失败：写入返回原始字节（EXIF 未被修改），未改动相册"
+
+        /** 有坐标但反查地名未回来时的统一展示文案（EditScreen 地点卡 / LocationSheet 头部共用，Minor④）。 */
+        internal const val PENDING_PLACE_LABEL = "已设坐标·地名待获取"
         private const val GPS_TOLERANCE = 0.001 // ≈111 m，覆盖 Float 精度 + DMS 有理化损耗
         private const val RATIONAL_TOLERANCE = 0.001 // 覆盖 /10000 有理化与十进制往返损耗
 

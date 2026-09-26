@@ -110,6 +110,7 @@ class EditViewModelTest {
         var lastCopyDateTaken: Long = -1
         var lastOverwriteUri: Uri? = null
         var overwriteCount = 0
+        var saveCopyCount = 0
         var lastDisplayNameUri: Uri? = null
 
         override suspend fun displayNameOf(uri: Uri): String? {
@@ -119,6 +120,7 @@ class EditViewModelTest {
         override suspend fun existingNames(): Set<String> = existing
 
         override suspend fun saveCopy(bytes: ByteArray, newName: String, dateTakenMillis: Long): SaveOutcome {
+            saveCopyCount++
             lastCopyName = newName
             lastCopyBytes = bytes
             lastCopyDateTaken = dateTakenMillis
@@ -548,6 +550,69 @@ class EditViewModelTest {
         val ready = vm.state.value as EditState.Ready
         assertEquals(baseMeta, ready.original)
         assertSame(jpegBytes, ready.bytes)
+    }
+
+    // ---- Important#1：静默失败前置于 writer（相册零触达，不留垃圾副本） ----
+
+    @Test
+    fun `write 静默失败在插入相册前拦截 saveCopy 零调用`() = runTest {
+        val repo = readyRepo().apply { simulateSilentFailure = true }
+        val writer = FakeWriter()
+        val vm = viewModel(repo = repo, writer = writer)
+        vm.load(uri)
+        vm.setTakenAt(LocalDateTime.of(2030, 1, 1, 0, 0, 0))
+        vm.saveAsCopy()
+        // 旧实现红：先 saveCopy 插入 `原名_副本.jpg`，onSaved 事后校验才报 Failed——
+        // 相册留下未编辑的垃圾副本。现在同一性检查在 writer 之前。
+        val failed = vm.saveState.value as SaveState.Failed
+        assertContains(failed.reason, "原始字节")
+        assertEquals(1, repo.writeCalls) // 判定发生在 write 之后
+        assertEquals(0, writer.saveCopyCount) // 但 writer 从未被触达
+        assertEquals(null, writer.lastCopyName)
+        assertEquals(null, writer.lastDisplayNameUri) // 连命名查询都不发起
+    }
+
+    @Test
+    fun `write 静默失败时 overwrite 也不开流`() = runTest {
+        val repo = readyRepo().apply { simulateSilentFailure = true }
+        val writer = FakeWriter()
+        val vm = viewModel(repo = repo, writer = writer)
+        vm.load(uri)
+        vm.setIso(800)
+        vm.overwriteOriginal()
+        // 同一条防线：不打开输出流（openOutputStream("w") 打开即截断），零覆盖写入
+        assertTrue(vm.saveState.value is SaveState.Failed)
+        assertEquals(0, writer.overwriteCount)
+    }
+
+    @Test
+    fun `无字段变更时 write 原样返回是合法路径 副本照常保存`() = runTest {
+        val repo = readyRepo().apply { simulateSilentFailure = true }
+        val writer = FakeWriter()
+        val vm = viewModel(repo = repo, writer = writer)
+        vm.load(uri)
+        vm.saveAsCopy() // 未做任何编辑：changedFields 为空，同一引用不判失败
+        assertEquals(1, writer.saveCopyCount)
+        assertTrue(vm.saveState.value is SaveState.DoneSaved)
+    }
+
+    // ---- Minor#2：Model 清空 = 删除标签，不写空串 ----
+
+    @Test
+    fun `setModel 空白输入回写 null 而非空串`() = runTest {
+        val vm = viewModel()
+        vm.load(uri)
+        vm.setModel("")
+        assertEquals(null, (vm.state.value as EditState.Ready).edited.model)
+        vm.setModel("   ")
+        assertEquals(null, (vm.state.value as EditState.Ready).edited.model)
+        vm.setModel("iPhone 16")
+        assertEquals("iPhone 16", (vm.state.value as EditState.Ready).edited.model)
+        // 清空后相对 original（"Pixel 8"）确有变更 → 保存走"物理删除 Model 标签"路径
+        vm.setModel("")
+        val ready = vm.state.value as EditState.Ready
+        assertContains(changedFields(ready.original, ready.edited), MetadataField.MODEL)
+        assertEquals(null, ready.edited.model)
     }
 
     // ---- overwriteOriginal ----
