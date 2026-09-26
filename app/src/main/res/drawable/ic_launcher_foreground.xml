@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 白色"照片"字形：相框 + 太阳 + 山峦，置于 108dp 画布安全区内 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M32,36 L76,36 L76,72 L32,72 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4" />
+    <path
+        android:pathData="M44,48 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M32,66 L48,52 L58,61 L68,52 L76,60 L76,72 L32,72 Z"
+        android:fillColor="#FFFFFF" />
+</vector>
