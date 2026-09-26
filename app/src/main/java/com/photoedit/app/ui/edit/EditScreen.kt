@@ -73,6 +73,8 @@ import coil.decode.ExifOrientationPolicy
 import coil.request.ImageRequest
 import com.photoedit.app.domain.GpsCoordinates
 import com.photoedit.app.domain.PhotoMetadata
+import com.photoedit.app.ui.location.LocationSheet
+import com.photoedit.app.ui.location.rememberLocationRequester
 import com.photoedit.app.ui.theme.IosDanger
 import com.photoedit.app.ui.theme.IosSecondaryLabel
 import com.photoedit.app.ui.theme.IosSeparator
@@ -100,7 +102,8 @@ private const val DEFAULT_PREVIEW_RATIO = 0.75f // 位图尺寸未知（加载�
  *   用 graphicsLayer 做 1..8 的旋正映射（见 [applyExifUpright]）。
  * - 各输入卡只改本地文本，解析合法才回写 ViewModel（spec §4：非法输入不污染状态）；
  *   remember 以 uri 为 key，切图后字段重新播种。
- * - 地点卡为 Task 14 占位（AlertDialog 说明 + 清除地点）。
+ * - 地点卡打开 [LocationSheet]（Task 14：搜索 / 当前定位 / 手动经纬度 / 清除）；
+ *   有坐标但地名反查未回来时卡片显示"已设坐标·地名待获取"，不阻塞保存。
  * - 保存反馈（spec §3.5）：DoneSaved/Failed → snackbar；NeedsOverwritePermission →
  *   经 [onLaunchOverwritePermission] 发起系统授权（launcher 在 MainActivity 层），
  *   SaveSheet 内同时给"改为另存副本"一键路径。
@@ -116,6 +119,9 @@ fun EditScreen(
     val saveState by vm.saveState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var showSaveSheet by remember { mutableStateOf(false) }
+    var showLocationSheet by remember { mutableStateOf(false) }
+    // 定位的权限 launcher + 取位协程挂在本页作用域：系统授权弹窗打断地点面板时结果不丢
+    val locationRequester = rememberLocationRequester(vm) { showLocationSheet = false }
 
     // 一次性事件（非法输入等，无 replay）→ snackbar
     LaunchedEffect(Unit) {
@@ -202,7 +208,13 @@ fun EditScreen(
                     ) {
                         item { PreviewCard(uri = uri, orientation = s.edited.orientation) }
                         item { TakenAtCard(takenAt = s.edited.takenAt, onPicked = { vm.setTakenAt(it) }) }
-                        item { PlaceCard(placeName = s.edited.placeName, gps = s.edited.gps, onClear = { vm.clearGps() }) }
+                        item {
+                            PlaceCard(
+                                placeName = s.edited.placeName,
+                                gps = s.edited.gps,
+                                onEdit = { showLocationSheet = true },
+                            )
+                        }
                         item { CameraInfoCard(sessionKey = uri, edited = s.edited, vm = vm) }
                     }
                 }
@@ -212,6 +224,14 @@ fun EditScreen(
 
     if (showSaveSheet) {
         SaveSheet(vm = vm, onDismiss = { showSaveSheet = false })
+    }
+
+    if (showLocationSheet) {
+        LocationSheet(
+            vm = vm,
+            location = locationRequester,
+            onDismiss = { showLocationSheet = false },
+        )
     }
 }
 
@@ -354,33 +374,16 @@ private fun TakenAtCard(takenAt: LocalDateTime?, onPicked: (LocalDateTime) -> Un
     }
 }
 
-// ---- 地点卡（Task 14 占位） ----
+// ---- 地点卡 ----
 
 @Composable
-private fun PlaceCard(placeName: String?, gps: GpsCoordinates?, onClear: () -> Unit) {
-    var showDialog by remember { mutableStateOf(false) }
-
+private fun PlaceCard(placeName: String?, gps: GpsCoordinates?, onEdit: () -> Unit) {
     Column(Modifier.iosCard()) {
         CardRow(
             title = "拍摄地点",
-            value = placeName ?: "未设置",
+            value = placeName ?: if (gps != null) "已设坐标·地名待获取" else "未设置",
             secondary = gps?.let { String.format(Locale.US, "%.5f, %.5f", it.latitude, it.longitude) },
-            onClick = { showDialog = true },
-        )
-    }
-
-    if (showDialog) {
-        AlertDialog(
-            onDismissRequest = { showDialog = false },
-            title = { Text("拍摄地点") },
-            text = { Text("地点编辑（搜索 / 定位 / 手动经纬度）将在下一步接入") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onClear()
-                    showDialog = false
-                }) { Text("清除地点", color = IosDanger) }
-            },
-            dismissButton = { TextButton(onClick = { showDialog = false }) { Text("关闭") } },
+            onClick = onEdit,
         )
     }
 }
