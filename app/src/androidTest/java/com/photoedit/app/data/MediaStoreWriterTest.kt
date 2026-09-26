@@ -14,6 +14,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -24,7 +25,8 @@ import java.util.UUID
  * 仪器测试（真机会话）：MediaStoreWriter 的副本插入 / 覆盖 / 写授权。
  * 零存储权限（spec §1/§3.4 修订）：不声明也不授予 READ_MEDIA_*，
  * MediaStore 查询仅见本 app 自有条目；不测外部条目枚举与 Live 双文件配对（功能已删）。
- * 所有插入条目 @After 自行清理；外部所有权场景尽力构造，构造不出则跳过并在报告注明。
+ * 所有插入条目 @After 自行清理；外部所有权场景尽力构造，构造不出则以 Assume 显式
+ * 跳过（运行器报告 skipped，而非假绿通过），NeedsPermission 路径转 Task 13 真机验收。
  */
 @RunWith(AndroidJUnit4::class)
 class MediaStoreWriterTest {
@@ -181,7 +183,9 @@ class MediaStoreWriterTest {
             // executeShellCommand 的 cp（shell uid，不经 shell 解释器所以不能用重定向）复制成
             // 新文件——FUSE 自动入库后该条目 owner=shell，本 app 无写权限。
             val seedName = "PE_T10_seed_$tag.jpg"
-            val seedUri = (writer.saveCopy(jpeg(1), seedName, System.currentTimeMillis()) as SaveOutcome.Saved).uri
+            val seed = writer.saveCopy(jpeg(1), seedName, System.currentTimeMillis())
+            assertTrue("seed saveCopy 应成功，实际: $seed", seed is SaveOutcome.Saved)
+            val seedUri = (seed as SaveOutcome.Saved).uri
             inserted += seedUri
             val seedPath = "/storage/emulated/0/Pictures/$seedName"
             val name = "PE_T10_ext_$tag.jpg"
@@ -198,10 +202,9 @@ class MediaStoreWriterTest {
                 if (uri != null) return@repeat
                 kotlinx.coroutines.delay(200)
             }
-            if (uri == null) {
-                println("EXT-SCENARIO SKIPPED: cp 条目未入库") // 构造不出真实权限场景：跳过，见报告 concerns
-                return@runBlocking
-            }
+            // 零权限下 shell 属主行对本 app 查询不可见，uri 大概率取不到：
+            // 显式 Assume-skip（运行器报告 skipped），不再 println 早退假绿。
+            Assume.assumeTrue("外部属主场景在零权限下不可构造，NeedsPermission 路径转 Task13 真机验收", uri != null)
             println("EXT-SCENARIO ACTIVE uri=$uri")
             inserted += uri!! // 若系统后续允许删除/row 属主变化时兜底清理（shell rm 已覆盖文件）
 
