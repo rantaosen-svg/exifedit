@@ -2,6 +2,7 @@ package com.photoedit.app.data
 
 import android.graphics.Bitmap
 import androidx.exifinterface.media.ExifInterface
+import com.photoedit.app.domain.GpsConvert
 import com.photoedit.app.domain.GpsCoordinates
 import com.photoedit.app.domain.PhotoMetadata
 import org.junit.Assert.assertArrayEquals
@@ -15,6 +16,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.time.LocalDateTime
+import kotlin.math.roundToLong
 
 /**
  * 仪器测试：ExifInterface 完整"读→改→写→重读"往返（spec §5.2）。
@@ -229,6 +231,106 @@ class ExifRepositoryTest {
             ExifInterface.TAG_GPS_VERSION_ID,
         ).forEach { assertNull("tag $it not removed", ei.getAttribute(it)) }
         assertNull(metadataOf(out).gps)
+    }
+
+    // ---- 隐私：清除 GPS 后原坐标字节不可恢复（Important #1） ----
+
+    private fun le32(v: Int) =
+        byteArrayOf(v.toByte(), (v shr 8).toByte(), (v shr 16).toByte(), (v shr 24).toByte())
+
+    private fun be32(v: Int) =
+        byteArrayOf((v shr 24).toByte(), (v shr 16).toByte(), (v shr 8).toByte(), v.toByte())
+
+    private fun doubleBits(v: Double, le: Boolean): ByteArray {
+        val bb = java.nio.ByteBuffer.allocate(8)
+        bb.order(if (le) java.nio.ByteOrder.LITTLE_ENDIAN else java.nio.ByteOrder.BIG_ENDIAN)
+        return bb.putDouble(v).array()
+    }
+
+    private fun indexOfBytes(hay: ByteArray, needle: ByteArray): Int {
+        outer@ for (i in 0..hay.size - needle.size) {
+            for (j in needle.indices) if (hay[i + j] != needle[j]) continue@outer
+            return i
+        }
+        return -1
+    }
+
+    private fun hex(b: ByteArray) = b.joinToString(" ") { "%02X".format(it) }
+
+    @Test fun gpsClearedScrubRawCoordinateBytes() {
+        val lat = 31.2345678
+        val lon = 121.9876543
+        // 与生产写路径一致的编码：GpsConvert DMS + dmsToExifString（分母 1/1/10000）
+        val l1 = GpsConvert.fromDecimalLatitude(lat)!!
+        val l2 = GpsConvert.fromDecimalLongitude(lon)!!
+        val latSecNum = (l1.seconds * 10_000).roundToLong().toInt() // 44441
+        val lonSecNum = (l2.seconds * 10_000).roundToLong().toInt() // 155555
+        val seeded = repo.write(
+            jpegBytes(), PhotoMetadata(),
+            fullMd.copy(gps = GpsCoordinates(lat, lon, null)),
+        )
+        // 防假绿：写入产物中必须能扫到度分秒 rational 的真实编码（设备端 TIFF 端序未知，LE/BE 任一命中即可）
+        assertTrue("scanner sanity: lat seconds num not found in seeded",
+            indexOfBytes(seeded, le32(latSecNum)) >= 0 || indexOfBytes(seeded, be32(latSecNum)) >= 0)
+        assertTrue("scanner sanity: lon seconds num not found in seeded",
+            indexOfBytes(seeded, le32(lonSecNum)) >= 0 || indexOfBytes(seeded, be32(lonSecNum)) >= 0)
+        val original = metadataOf(seeded)
+        assertNotNull(original.gps)
+        val out = repo.write(seeded, original, original.copy(gps = null))
+        assertFalse(exifOf(out).getLatLong(FloatArray(2)))
+        // 清除后全文件扫描：原经纬度不得以任一坐标专属编码出现——
+        // 1) 十进制度 double 位模式（LE/BE）；2) DMS 分子（度/分/秒 u32 LE/BE）；
+        // 3) 秒 rational 完整数对 (secNum,10000) LE/BE。
+        // 注：单独的分母 10000 不是坐标专属——本夹具的 ExposureTime=0.008 在 androidx
+        // 重序列化为 BE rational 80/10000，属存活相机标签，清零会毁文件；故以"数对"形式断言。
+        val patterns = ArrayList<ByteArray>()
+        for (v in doubleArrayOf(lat, lon)) {
+            patterns += doubleBits(v, true); patterns += doubleBits(v, false)
+        }
+        for (n in intArrayOf(l1.degrees, l1.minutes, l2.degrees, l2.minutes, latSecNum, lonSecNum)) {
+            patterns += le32(n); patterns += be32(n)
+        }
+        patterns += le32(latSecNum) + le32(10000)
+        patterns += be32(latSecNum) + be32(10000)
+        patterns += le32(lonSecNum) + le32(10000)
+        patterns += be32(lonSecNum) + be32(10000)
+        for (p in patterns) {
+            assertTrue("residual coordinate bytes ${hex(p)} still present", indexOfBytes(out, p) < 0)
+        }
+        // 同时确认存活相机数据未被误清：ExposureTime 仍可解析且值正确
+        assertEquals(0.008, metadataOf(out).shutterSeconds!!, 1e-4)
+    }
+
+    // ---- 相机型文件：本 app 不管理的标签在普通字段写入后必须存活（Important #2） ----
+
+    @Test fun cameraLikeUnmanagedTagsSurvivePlainFieldWrite() {
+        // 缩略图注：androidx ExifInterface 1.3.7 公开 API 无法预置 IFD1 缩略图，
+        // 无法在此夹具真实覆盖；已在 task-9 报告记为局限（仅断言缩略图状态不变）。
+        val artist = "PhotoEdit Tester"
+        val comment = "photoedit-pinned-2026"
+        val seeded = setTags(
+            jpegBytes(),
+            ExifInterface.TAG_ARTIST to artist,
+            ExifInterface.TAG_USER_COMMENT to comment,
+        )
+        assertNotNull("fixture seeding failed (artist)", exifOf(seeded).getAttribute(ExifInterface.TAG_ARTIST))
+        val original = metadataOf(seeded)
+        assertNull(original.takenAt)
+        val newTaken = LocalDateTime.of(2022, 6, 1, 12, 0, 0)
+        val out = repo.write(seeded, original, original.copy(takenAt = newTaken))
+        val ei = exifOf(out)
+        assertEquals(newTaken, metadataOf(out).takenAt) // 本次写入确实生效
+        assertEquals(artist, ei.getAttribute(ExifInterface.TAG_ARTIST)?.trim())
+        assertTrue(
+            "UserComment lost/garbled: ${ei.getAttribute(ExifInterface.TAG_USER_COMMENT)}",
+            (ei.getAttribute(ExifInterface.TAG_USER_COMMENT) ?: "").contains(comment),
+        )
+        // MakerNote：Bitmap 夹具无厂商数据，只能钉住"读不崩、原样缺失"这一行为
+        assertNull(ei.getAttribute(ExifInterface.TAG_MAKER_NOTE))
+        assertEquals(
+            exifOf(seeded).thumbnailBytes?.size,
+            ei.thumbnailBytes?.size, // 夹具无缩略图 → 写前后均为 null/空
+        )
     }
 
     // ---- 动态照片（spec §3.4） ----
