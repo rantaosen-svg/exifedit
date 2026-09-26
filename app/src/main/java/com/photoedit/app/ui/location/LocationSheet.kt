@@ -22,7 +22,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
@@ -63,6 +63,7 @@ import com.photoedit.app.ui.theme.IosSecondaryLabel
 import com.photoedit.app.ui.theme.IosSeparator
 import com.photoedit.app.ui.theme.IosSurface
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -71,8 +72,9 @@ import kotlin.coroutines.resume
 /**
  * 地点编辑面板（spec §3.3）：搜索 / 当前定位 / 手动经纬度 三段 + 清除地点。
  *
- * - 网络请求一律经 [EditViewModel.searchPlaces]（UI 不持有 Geocoder）；坐标回写只有
- *   [EditViewModel.setGps] 一个入口，地名反查由 ViewModel 内建（面板不再重复 reverse）。
+ * - 网络请求一律经 [EditViewModel.searchPlaces]（UI 不持有 Geocoder）；坐标回写经
+ *   [applySearchPick]（搜索结果：自带地名）/ [applyCoords]（手动、当前定位：坐标变化先清旧名
+ *   让 [EditViewModel.setGps] 的内建反查为新坐标回填匹配地名，评审 #1），面板不自行 reverse。
  * - 当前定位只用系统 [LocationManager]（不引入 GMS/融合定位，国行机无谷歌）。
  *   `ACCESS_FINE_LOCATION` 只在此操作时申请；权限 launcher 与取位协程挂在**调用方**
  *   （[rememberLocationRequester]，编辑页作用域）——系统授权弹窗会打断面板窗口，
@@ -112,7 +114,7 @@ fun LocationSheet(
                 LocationTab.Search -> SearchSection(
                     search = { query -> vm.searchPlaces(query) },
                     onPick = { place ->
-                        vm.setGps(place.latitude, place.longitude)
+                        applySearchPick(vm, place)
                         onDismiss()
                     },
                 )
@@ -120,13 +122,14 @@ fun LocationSheet(
                 LocationTab.Current -> CurrentLocationSection(
                     locating = location.locating,
                     error = location.error,
+                    notice = location.notice,
                     onLocate = location.request,
                 )
 
                 LocationTab.Manual -> ManualSection(
                     gps = ready.edited.gps,
                     onApply = { lat, lon ->
-                        vm.setGps(lat, lon)
+                        applyCoords(vm, lat, lon)
                         onDismiss()
                     },
                 )
@@ -158,21 +161,27 @@ private enum class LocationTab(val label: String) {
 
 // ---- 当前定位请求控制器 ----
 
+/** 取位结果：[staleCacheAgeMillis] 非 null = 实时路径失败后回落的有时限过期缓存，UI 必须明示年龄。 */
+internal data class LocationResult(val fix: LocationFix, val staleCacheAgeMillis: Long?)
+
 /**
  * 定位请求的状态出口：[locating] 取位中（按钮禁用 + 进度），[error] 就地失败文案，
+ * [notice] 就地中性提示（目前唯一来源：使用了过期缓存位置，评审 #2），
  * [request] 发起（必要时先申请权限）。
  */
 class LocationRequester(
     val locating: Boolean,
     val error: String?,
+    val notice: String?,
     val request: () -> Unit,
 )
 
 /**
  * 在**调用方**作用域注册权限 launcher 与取位协程（见 [LocationSheet] 注释），
- * 成功后经 [EditViewModel.setGps] 回写坐标并回调 [onLocated]（面板用它关闭自己）。
- * 失败（无权限 / 超时 / 无可用 provider）只写 [LocationRequester.error] +
- * 一条 [EditViewModel.reportIssue] 事件，不抛不崩。
+ * 成功后经 [applyCoords] 回写坐标并回调 [onLocated]（面板用它关闭自己）。
+ * 失败（无权限 / 超时 / 无可用 provider / 缓存超时限）只写 [LocationRequester.error] +
+ * 一条 [EditViewModel.reportIssue] 事件，不抛不崩；走了过期缓存则经 [LocationRequester.notice]
+ * + events 双通道明示"使用了 N 分钟前的缓存位置"。
  */
 @Composable
 internal fun rememberLocationRequester(vm: EditViewModel, onLocated: () -> Unit): LocationRequester {
@@ -180,19 +189,33 @@ internal fun rememberLocationRequester(vm: EditViewModel, onLocated: () -> Unit)
     val scope = rememberCoroutineScope()
     var locating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
 
     val start: () -> Unit = {
         if (!locating) {
             locating = true
             error = null
+            notice = null
             scope.launch {
-                val fix = runCatching { fetchCurrentLocation(context) }.getOrNull()
+                val result = try {
+                    fetchCurrentLocation(context)
+                } catch (e: CancellationException) {
+                    // 用户离开界面导致作用域取消：这不是定位失败，静默结束，不报误导性错误（评审 #5）
+                    return@launch
+                } catch (e: Exception) {
+                    null
+                }
                 locating = false
-                if (fix == null) {
+                if (result == null) {
                     error = "无法获取当前定位，可改用手动经纬度"
                     vm.reportIssue("无法获取当前定位")
                 } else {
-                    vm.setGps(fix.latitude, fix.longitude) // 地名由 VM 反查回填
+                    applyCoords(vm, result.fix.latitude, result.fix.longitude) // 地名由 VM 反查回填
+                    result.staleCacheAgeMillis?.let { age ->
+                        val text = staleCacheNotice(age)
+                        notice = text // 就地中性提示 + events（面板已关时编辑页 snackbar 接住）
+                        vm.reportIssue(text)
+                    }
                     onLocated()
                 }
             }
@@ -209,6 +232,7 @@ internal fun rememberLocationRequester(vm: EditViewModel, onLocated: () -> Unit)
     return LocationRequester(
         locating = locating,
         error = error,
+        notice = notice,
         request = {
             if (hasLocationPermission(context)) start()
             else launcher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -301,7 +325,11 @@ private fun SearchSection(
             )
 
             else -> LazyColumn(Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
-                items(results!!, key = { "${it.displayName}@${it.latitude},${it.longitude}" }) { place ->
+                // key 追加 index（评审 #8）：接口返回两条同名同坐标的候选时纯内容 key 会重复并崩溃
+                itemsIndexed(
+                    results!!,
+                    key = { index, place -> "${place.displayName}@${place.latitude},${place.longitude}#$index" },
+                ) { _, place ->
                     PlaceResultRow(place, onClick = { onPick(place) })
                 }
             }
@@ -344,13 +372,15 @@ private fun HintLine(text: String) {
 // ---- 当前定位 ----
 
 @Composable
-private fun CurrentLocationSection(locating: Boolean, error: String?, onLocate: () -> Unit) {
+private fun CurrentLocationSection(locating: Boolean, error: String?, notice: String?, onLocate: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Button(onClick = onLocate, enabled = !locating, modifier = Modifier.fillMaxWidth()) {
             Text(if (locating) "定位中…" else "获取当前定位")
         }
         Spacer(Modifier.height(8.dp))
         HintLine("使用系统定位（LocationManager），不依赖谷歌服务")
+        // 评审 #2：走了有时限的过期缓存时必须就地明示"使用了 N 分钟前的缓存位置"
+        if (notice != null) HintLine(notice)
         if (error != null) {
             Text(
                 error,
@@ -413,6 +443,31 @@ private fun ErrorLine(text: String) {
         textAlign = TextAlign.Start,
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+// ---- 选点应用路径（评审 #1：重选地点不得残留旧地名） ----
+
+/**
+ * 搜索结果选中：直接把结果展示名写入 placeName 再设坐标。
+ * 搜索结果的displayName就是该坐标的地名，[EditViewModel.setGps] 的"名为空才反查"守卫
+ * 因此天然跳过——既省一次 reverse，也保证旧地名不存活（评审 #1：只调 setGps 时
+ * 守卫会因旧名非空而跳过反查，卡片显示"上一个地点名 + 新坐标"）。
+ */
+internal fun applySearchPick(vm: EditViewModel, place: GeoPlace) {
+    vm.setPlaceName(place.displayName)
+    vm.setGps(place.latitude, place.longitude)
+}
+
+/**
+ * 手动 / 当前定位应用：坐标相对当前 edited.gps **实际变化**时先清地名，
+ * 让 [EditViewModel.setGps] 的反查守卫为新高地坐标回填匹配地名（评审 #1）；
+ * 坐标未变则不清（重复应用同一坐标不丢用户自定义名）。
+ * 十进制字面比较够用：edited.gps 只由本会话三条路径原样写入，无 EXIF 往返。
+ */
+internal fun applyCoords(vm: EditViewModel, lat: Double, lon: Double) {
+    val current = (vm.state.value as? EditState.Ready)?.edited?.gps
+    if (current == null || current.latitude != lat || current.longitude != lon) vm.clearPlaceName()
+    vm.setGps(lat, lon)
 }
 
 // ---- 手动输入校验（纯逻辑，JVM 可测） ----
@@ -491,6 +546,37 @@ internal fun freshestCachedFix(
     return if (age in 0..maxAgeMillis) best else null
 }
 
+/** 实时定位全失败后，过期缓存可容忍的最大年龄（评审 #2：昨天的缓存不能冒充"当前位置"）。 */
+internal const val STALE_FALLBACK_MAX_AGE_MS = 30 * 60_000L
+
+/** 过期缓存兜底判定结果：[Usable.ageMillis] 供 UI 明示陈旧度；超时限/无效则 [Unusable]。 */
+internal sealed interface FallbackCache {
+    data class Usable(val fix: LocationFix, val ageMillis: Long) : FallbackCache
+    data object Unusable : FallbackCache
+}
+
+/**
+ * 实时路径失败后的缓存兜底：取时间最新者，仅接受年龄 ∈ [0, maxAgeMillis]。
+ * 与 [freshestCachedFix] 同一口径——时间戳缺失（≤0）或未来时间戳（时钟回拨，age<0）
+ * 一律 [FallbackCache.Unusable]，由调用方按"无法获取当前定位"提示。
+ */
+internal fun fallbackCachedFix(
+    candidates: List<LocationFix>,
+    nowMillis: Long,
+    maxAgeMillis: Long = STALE_FALLBACK_MAX_AGE_MS,
+): FallbackCache {
+    val best = candidates.filter { it.timeMillis > 0 }.maxByOrNull { it.timeMillis }
+        ?: return FallbackCache.Unusable
+    val age = nowMillis - best.timeMillis
+    return if (age in 0..maxAgeMillis) FallbackCache.Usable(best, age) else FallbackCache.Unusable
+}
+
+/** 使用过期缓存时的明示文案：年龄向上取整到分钟、至少 1 分钟（评审 #2）。 */
+internal fun staleCacheNotice(ageMillis: Long): String {
+    val minutes = ((ageMillis + 59_999) / 60_000).coerceAtLeast(1)
+    return "使用了 $minutes 分钟前的缓存位置"
+}
+
 private fun hasLocationPermission(context: Context): Boolean =
     ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
         PackageManager.PERMISSION_GRANTED
@@ -499,22 +585,27 @@ private fun hasLocationPermission(context: Context): Boolean =
  * 系统 [LocationManager] 取当前定位：
  * 1. 各 provider 的 `getLastKnownLocation` 快速返回（[CACHED_MAX_AGE_MS] 内直接采用）；
  * 2. 否则对第一个已开启的 provider 发 `requestSingleUpdate`（GPS > network > passive），
- *    [LOCATE_TIMEOUT_MS] 超时/失败后回落到（可能陈旧的）缓存；
- * 3. 都没有则 null，由 UI 就地提示并给出手动兜底。
+ *    [LOCATE_TIMEOUT_MS] 超时/失败后回落到过期缓存；
+ * 3. 兜底缓存只接受 [STALE_FALLBACK_MAX_AGE_MS] 内的（评审 #2），且经
+ *    [LocationResult.staleCacheAgeMillis] 要求 UI 明示"使用了 N 分钟前的缓存位置"；
+ *    超时限或都没有则 null，由 UI 就地提示并给出手动兜底。
  *
  * 调用方必须已拿到 `ACCESS_FINE_LOCATION`（[hasLocationPermission] + 运行时申请在
  * [rememberLocationRequester] 里，即编辑页作用域）。
  */
 @SuppressLint("MissingPermission")
-private suspend fun fetchCurrentLocation(context: Context): LocationFix? {
+private suspend fun fetchCurrentLocation(context: Context): LocationResult? {
     val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
     val providers = LOCATION_PROVIDERS.filter { runCatching { lm.getProvider(it) != null }.getOrDefault(false) }
     if (providers.isEmpty()) return null
     val cached = providers.mapNotNull { runCatching { lm.getLastKnownLocation(it) }.getOrNull()?.toFixOrNull() }
-    freshestCachedFix(cached, System.currentTimeMillis())?.let { return it }
+    freshestCachedFix(cached, System.currentTimeMillis())?.let { return LocationResult(it, null) }
     val live = providers.firstOrNull { runCatching { lm.isProviderEnabled(it) }.getOrDefault(false) }
-    // 实时定位失败/超时 → 回落到（可能陈旧的）缓存，聊胜于无；仍无有效时间戳则 null
-    return live?.let { awaitSingleLocation(lm, it) } ?: cached.filter { it.timeMillis > 0 }.maxByOrNull { it.timeMillis }
+    val direct = live?.let { awaitSingleLocation(lm, it) }
+    if (direct != null) return LocationResult(direct, null)
+    // 实时定位失败/超时 → 回落有时限的过期缓存（评审 #2）；超时限按"无法获取当前定位"处理
+    val fallback = fallbackCachedFix(cached, System.currentTimeMillis())
+    return (fallback as? FallbackCache.Usable)?.let { LocationResult(it.fix, it.ageMillis) }
 }
 
 @SuppressLint("MissingPermission")

@@ -167,6 +167,9 @@ class EditViewModel(
 
     fun setPlaceName(v: String) = edit { it.copy(placeName = v) }
 
+    /** 只清地名不动坐标：地点面板在"坐标实际变化"时用它解除 [setGps] 的反查守卫（评审 #1）。 */
+    fun clearPlaceName() = edit { it.copy(placeName = null) }
+
     fun clearGps() = edit { it.copy(gps = null, placeName = null) }
 
     fun setGps(lat: Double, lon: Double) {
@@ -203,8 +206,8 @@ class EditViewModel(
      * 空/全空白 query 不发请求；任何异常（离线、超时、解析失败）吞掉后返回空列表——
      * 由地点面板把"无结果"就地降级为"可改用手动经纬度"，不阻塞保存。
      *
-     * 反查地名不在此列：[setGps] 已内建带会话守卫的反查回填，面板只需调 [setGps]，
-     * 再发一次 reverse 会是重复请求。
+     * 反查地名不在此列：[setGps] 已内建带会话守卫的反查回填，面板经
+     * applySearchPick / applyCoords（ui.location）走坐标回写，不重复发 reverse。
      */
     suspend fun searchPlaces(query: String): List<GeoPlace> {
         val trimmed = query.trim()
@@ -381,7 +384,11 @@ class EditViewModel(
                 EditViewModel(
                     repo = ExifRepository(),
                     writer = MediaStoreWriter(app),
-                    geocoder = PhotonGeocoder(OkHttpFetcher()),
+                    // spec §3.3：搜索/反查 Photon 为主、Nominatim 兜底——fallback 必须装配，
+                    // 否则 Photon 挂了地点功能双双空转（Task 14 评审 #3）。
+                    // Nominatim 礼貌限流的 mutex 为 PhotonGeocoder 实例级：每台设备单用户单 VM 实例，
+                    // 串行已足够，无需进程级全局闸门。
+                    geocoder = PhotonGeocoder(OkHttpFetcher(), fallback = OkHttpFetcher()),
                     readBytes = { uri ->
                         app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                             ?: throw IOException("无法打开图片输入流")

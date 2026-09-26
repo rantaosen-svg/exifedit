@@ -330,6 +330,16 @@ class EditViewModelTest {
         assertEquals(null, ready.edited.placeName)
     }
 
+    @Test
+    fun `clearPlaceName 只清地名不动坐标`() = runTest {
+        val vm = viewModel(repo = readyRepo(baseMeta.copy(gps = GpsCoordinates(1.0, 2.0), placeName = "外滩")))
+        vm.load(uri)
+        vm.clearPlaceName()
+        val ready = vm.state.value as EditState.Ready
+        assertEquals(null, ready.edited.placeName)
+        assertEquals(GpsCoordinates(1.0, 2.0, null), ready.edited.gps)
+    }
+
     // ---- 地名反查去重（Task 14：面板只调 setGps，不再自行 reverse） ----
 
     @Test
