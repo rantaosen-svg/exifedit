@@ -18,29 +18,35 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.photoedit.app.ui.CanonicalMediaUri
 import com.photoedit.app.ui.resolveCanonicalMediaUri
+import kotlinx.coroutines.launch
 
 /**
  * 入口页：大标题 + 副标题 + “选择照片”胶囊主按钮（系统 Photo Picker，无需存储权限）。
  *
  * - 格式（仅 JPEG）不在此校验，由后续 EditViewModel.load 判定并给出 UnsupportedFormat 提示。
- * - Task14a 缺陷 1：Photo Picker 返回的 uri 只读、非规范（`content://media/picker/...`），
- *   直接覆盖必失败、displayNameOf 只能取到 id 段名。这里把 picked uri 交给
- *   [resolveCanonicalMediaUri]（API 29+ `MediaStore.getMediaUri` 归一回规范 MediaStore uri），
- *   连同 canOverwrite 一起回调 [onPick]；拿不到规范 uri 时只读降级（覆盖入口禁用）。
+ * - Task14a 修复轮1（读写分离）：Photo Picker 返回的 uri 带**临时读授权**，读取/命名必须
+ *   继续用它；这里把它原样作为 readUri，另经 [resolveCanonicalMediaUri] 解析出仅用于
+ *   “覆盖原图”的规范 writeUri（picker uri 自身查 `_ID` 重建 media images uri；解析不到
+ *   则 writeUri=null，覆盖入口禁用、编辑与另存副本照常）。
+ * - 归一的 binder 查询在 Dispatchers.IO 协程内执行（评审 #6），不阻塞 picker 回调线程。
  */
 @Composable
 fun EntryScreen(onPick: (CanonicalMediaUri) -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val pickLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
-        if (uri != null) onPick(resolveCanonicalMediaUri(context, uri))
+        if (uri != null) scope.launch {
+            onPick(resolveCanonicalMediaUri(context, uri))
+        }
     }
 
     Box(

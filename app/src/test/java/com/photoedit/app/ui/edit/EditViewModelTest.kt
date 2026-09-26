@@ -110,8 +110,12 @@ class EditViewModelTest {
         var lastCopyDateTaken: Long = -1
         var lastOverwriteUri: Uri? = null
         var overwriteCount = 0
+        var lastDisplayNameUri: Uri? = null
 
-        override suspend fun displayNameOf(uri: Uri): String? = displayName
+        override suspend fun displayNameOf(uri: Uri): String? {
+            lastDisplayNameUri = uri
+            return displayName
+        }
         override suspend fun existingNames(): Set<String> = existing
 
         override suspend fun saveCopy(bytes: ByteArray, newName: String, dateTakenMillis: Long): SaveOutcome {
@@ -559,33 +563,131 @@ class EditViewModelTest {
         assertEquals(uri, writer.lastOverwriteUri)
     }
 
-    // ---- Task14a 缺陷 1：只读来源不可覆盖，就地 Failed 文案，不触达 writer ----
+    // ---- Task14a 修复轮1：读写 uri 分离（Critical#1）+ 覆盖降级（缺陷 1 语义保留）----
+
+    /** picker 场景的授权读 uri（读权限绑在其本身）与解析出的规范写 uri。 */
+    private val pickerReadUri = FakeUri("content://media/picker/0/external/images/media/77")
+    private val canonicalWriteUri = FakeUri("content://media/external/images/media/77")
 
     @Test
-    fun `canOverwrite 为 false 时 overwrite 直接 Failed 且不触达 writer`() = runTest {
+    fun `读取与命名走授权 readUri 覆盖与授权走规范 writeUri`() = runTest {
+        val readUris = Collections.synchronizedList(mutableListOf<Uri>())
+        val writer = FakeWriter().apply { displayName = "smoke.jpg" }
+        val vm = viewModel(
+            writer = writer,
+            readBytes = { u -> readUris.add(u); jpegBytes },
+        )
+        vm.load(pickerReadUri, canonicalWriteUri)
+        // 正面证明：load 的 readBytes 拿到的是**原始授权 uri**，绝不切到规范 uri 去读
+        assertEquals(listOf<Uri>(pickerReadUri), readUris)
+        vm.setIso(200)
+        vm.overwriteOriginal()
+        assertEquals(canonicalWriteUri, writer.lastOverwriteUri) // 写走规范 uri
+        vm.requestOverwritePermissionIntent()
+        assertEquals(canonicalWriteUri, writer.lastWriteIntentUri) // createWriteRequest 同走规范 uri
+        vm.saveAsCopy()
+        // 命名走带读授权的 uri（即便 writeUri 存在也不查无权限的规范 uri）
+        assertEquals(pickerReadUri, writer.lastDisplayNameUri)
+        assertEquals("smoke_副本.jpg", writer.lastCopyName)
+    }
+
+    @Test
+    fun `writeUri 缺失时副本名仍取授权 uri 的真名而非数字 id（Important#3）`() = runTest {
+        val writer = FakeWriter().apply { displayName = "smoke.jpg" }
+        val vm = viewModel(writer = writer)
+        vm.load(pickerReadUri, writeUri = null) // 归一失败降级：仅另存副本
+        vm.setIso(200)
+        vm.saveAsCopy()
+        assertEquals(pickerReadUri, writer.lastDisplayNameUri)
+        assertEquals("smoke_副本.jpg", writer.lastCopyName)
+        assertEquals(SaveState.DoneSaved(FakeWriter.savedUri), vm.saveState.value)
+    }
+
+    @Test
+    fun `writeUri 为 null 时 overwrite 直接 Failed 且不触达 writer`() = runTest {
         val writer = FakeWriter()
         val vm = viewModel(writer = writer)
-        vm.load(uri, canOverwrite = false)
+        vm.load(uri, writeUri = null)
         assertEquals(false, vm.overwriteSupported.value)
         vm.setIso(500)
         vm.overwriteOriginal()
         assertEquals(0, writer.overwriteCount)
-        assertTrue(vm.saveState.value is SaveState.Failed)
+        assertEquals(SaveState.Failed(EditViewModel.OVERWRITE_UNSUPPORTED_MSG), vm.saveState.value)
     }
 
     @Test
-    fun `canOverwrite 默认为 true 且 load 会重置上次的覆盖可用性`() = runTest {
+    fun `覆盖可用性默认随 writeUri 且 load 会重置上次的可用性`() = runTest {
         val writer = FakeWriter().apply { overwriteOutcome = SaveOutcome.NeedsPermission }
         val vm = viewModel(writer = writer)
-        vm.load(uri) // 默认可覆盖
+        vm.load(uri) // 默认 writeUri=uri（来源本身即规范 uri）→ 可覆盖
         assertEquals(true, vm.overwriteSupported.value)
-        vm.load(uri2, canOverwrite = false) // 换到只读来源
+        vm.load(uri2, writeUri = null) // 换到只读降级来源
         assertEquals(false, vm.overwriteSupported.value)
         vm.setIso(600)
         vm.overwriteOriginal()
         assertTrue(vm.saveState.value is SaveState.Failed)
         vm.reset() // 回入口重置为默认可覆盖
         assertEquals(true, vm.overwriteSupported.value)
+    }
+
+    @Test
+    fun `requestOverwritePermissionIntent 无 writeUri 时返回 null 且不触达 writer`() = runTest {
+        val writer = FakeWriter()
+        val vm = viewModel(writer = writer)
+        vm.load(uri, writeUri = null)
+        assertEquals(null, vm.requestOverwritePermissionIntent())
+        assertEquals(0, writer.writeIntentCalls)
+    }
+
+    // ---- Important#4：进入 NOP 由 VM 确定性发一次性授权请求事件 ----
+
+    @Test
+    fun `首次进入 NOP 发出一次授权请求事件 重入不重发 新会话复位`() = runTest {
+        val writer = FakeWriter().apply { overwriteOutcome = SaveOutcome.NeedsPermission }
+        val vm = viewModel(writer = writer)
+        val requests = Collections.synchronizedList(mutableListOf<Unit>())
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            vm.overwritePermissionRequests.toList(requests)
+        }
+        vm.load(uri)
+        vm.setIso(100)
+        vm.overwriteOriginal()
+        assertEquals(SaveState.NeedsOverwritePermission, vm.saveState.value)
+        assertEquals(1, requests.size) // 不依赖 UI 观测 Working→NOP 跃变
+        vm.overwriteOriginal() // 授权对话框拒绝后再次点覆盖：重入 NOP
+        vm.setIso(101)
+        vm.overwriteOriginal()
+        assertEquals(1, requests.size) // 同会话至多一次（防 NOP→Working→NOP 自动弹循环）
+        vm.load(uri2) // 新会话复位
+        vm.setIso(102)
+        vm.overwriteOriginal()
+        assertEquals(2, requests.size)
+    }
+
+    @Test
+    fun `降级来源的覆盖拒绝不发授权请求事件`() = runTest {
+        val vm = viewModel(writer = FakeWriter())
+        val requests = Collections.synchronizedList(mutableListOf<Unit>())
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            vm.overwritePermissionRequests.toList(requests)
+        }
+        vm.load(uri, writeUri = null)
+        vm.setIso(500)
+        vm.overwriteOriginal() // Failed(OVERWRITE_UNSUPPORTED_MSG)——没资格请求系统授权
+        assertTrue(vm.saveState.value is SaveState.Failed)
+        assertEquals(0, requests.size)
+    }
+
+    @Test
+    fun `sessionToken 令同一 uri 二次载入也区分新会话（评审 #8）`() = runTest {
+        val vm = viewModel()
+        vm.load(uri)
+        val first = vm.sessionToken
+        vm.load(uri) // 二次分享/选择同一 uri：currentUri 相等但令牌前进
+        val second = vm.sessionToken
+        assertTrue(second != first)
+        vm.reset()
+        assertTrue(vm.sessionToken != second)
     }
 
     @Test

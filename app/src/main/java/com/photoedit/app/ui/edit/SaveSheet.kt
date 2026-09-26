@@ -88,11 +88,12 @@ fun SaveSheet(vm: EditViewModel, onDismiss: () -> Unit) {
                 onClick = { vm.overwriteOriginal() },
             )
 
-            // Task14a 缺陷 1：只读来源（picker/分享 uri 归一失败）优雅降级——就地给文案，
-            // 引导"另存为副本"，不静默失败（spec §3.5/§4）。
+            // Task14a 缺陷 1：来源无可信规范 writeUri（picker/分享只读 uri 解析失败）时
+            // 优雅降级——就地给文案，引导"另存为副本"，不静默失败（spec §3.5/§4）。
+            // 评审 #7：文案常量化到 EditViewModel.OVERWRITE_UNSUPPORTED_MSG 一处，不再两处字面量。
             if (!overwriteSupported) {
                 Text(
-                    "该来源无法覆盖原图，请用另存为副本",
+                    EditViewModel.OVERWRITE_UNSUPPORTED_MSG,
                     style = MaterialTheme.typography.bodySmall,
                     color = IosSecondaryLabel,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),

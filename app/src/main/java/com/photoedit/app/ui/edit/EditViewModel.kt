@@ -97,35 +97,79 @@ class EditViewModel(
     val saveState: StateFlow<SaveState> = _saveState.asStateFlow()
 
     /**
-     * 当前来源能否走"覆盖原图"（Task14a 缺陷 1）：Photo Picker/分享的只读、非规范 uri
-     * 归一失败时为 false——编辑与另存副本照常，覆盖入口禁用（spec §3.5/§4：不静默失败）。
+     * 当前来源能否走"覆盖原图"（Task14a 修复轮1）：等价于 [loadedWriteUri] 非 null——
+     * picker/分享来源只有解析出**规范 MediaStore writeUri**（见 ui.MediaUriCanonical 的
+     * 权威来源门）才可覆盖；解析不到时 false——编辑与另存副本照常，覆盖入口禁用
+     * （spec §3.5/§4：不静默失败）。
      */
     private val _overwriteSupported = MutableStateFlow(true)
     val overwriteSupported: StateFlow<Boolean> = _overwriteSupported.asStateFlow()
 
-    /** 一次性错误提示事件（非法经纬度等）；无重放，晚订阅者不会收到陈旧提示。 */
+    /**
+     * 一次性错误提示事件（非法经纬度等）；无重放，晚订阅者不会收到陈旧提示。
+     */
     private val _events = MutableSharedFlow<String>(
         extraBufferCapacity = 8,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     val events: SharedFlow<String> = _events.asSharedFlow()
 
+    /**
+     * "该请求系统写授权"一次性事件（Important#4）：overwriteOriginal 落入
+     * NeedsOverwritePermission 时**由 VM 确定性发出**，EditScreen 订阅后拉起系统弹窗——
+     * 不再依赖 UI 恰好观测到 Working→NOP 的 StateFlow 跃变（conflation 可能吞掉首个
+     * NOP 导致 false-negative 不弹）。每个会话至多发一次（[autoOverwritePermissionRequested]
+     * 卡重入，防 NOP→授权→NOP 自动弹循环），[load]/[reset] 复位。
+     */
+    private val _overwritePermissionRequests = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val overwritePermissionRequests: SharedFlow<Unit> = _overwritePermissionRequests.asSharedFlow()
+
     private var loadedUri: Uri? = null
 
-    /** 当前会话的图片 uri（reset/未选图时 null）：编辑页预览用，UI 不必自行持有 load 会话。 */
+    /**
+     * 覆盖链路专用规范 uri（Task14a 修复轮1，Critical#1 读写分离）：
+     * 读取/命名永远走 [loadedUri]（原始授权 uri，读权限绑定在它本身）；
+     * overwriteOriginal / requestOverwritePermissionIntent 只走这里（规范 media images uri）。
+     * null = 来源解析不出可信规范 uri（或分享/file uri）→ 仅另存副本。
+     */
+    private var loadedWriteUri: Uri? = null
+
+    /** 本会话是否已自动发过系统写授权事件（[load]/[reset] 复位，卡重入循环）。 */
+    private var autoOverwritePermissionRequested = false
+
+    /**
+     * 会话自增令牌（评审 #8）：同一 uri 二次分享/选择时 [currentUri] 相等，UI 侧
+     * `remember(vm.currentUri, vm.sessionToken)` 靠令牌区分新会话，重置自动弹窗消费位。
+     */
+    private var sessionCounter = 0L
+    val sessionToken: Long get() = sessionCounter
+
+    /** 当前会话的图片 uri（reset/未选图时 null）：编辑页预览/读取路径用，即"授权读 uri"。 */
     val currentUri: Uri? get() = loadedUri
 
     // region load
 
-    fun load(uri: Uri, canOverwrite: Boolean = true) {
+    /**
+     * @param uri 原始授权读 uri（picker/分享带来的 uri）：预览、readBytes、displayNameOf 全走它。
+     * @param writeUri 覆盖链路规范 MediaStore uri（[uri] 自身即规范 uri 时默认同上）；
+     *   传 null 表示来源不可信覆盖 → 覆盖入口禁用（仅另存副本）。
+     */
+    fun load(uri: Uri, writeUri: Uri? = uri) {
         // 无重放守卫（评审 B 的 intent 消费已覆盖）；迟到结果靠 loadedUri 会话核对丢弃
         loadedUri = uri
-        _overwriteSupported.value = canOverwrite
+        loadedWriteUri = writeUri
+        _overwriteSupported.value = writeUri != null
+        autoOverwritePermissionRequested = false
+        sessionCounter++
         _state.value = EditState.Loading
         _saveState.value = SaveState.Idle
         viewModelScope.launch {
             try {
-                // 全文件读取 + EXIF 解析是重 IO，离开 Main（评审 #4）
+                // 全文件读取 + EXIF 解析是重 IO，离开 Main（评审 #4）；读的是授权 uri（[uri]），
+                // 绝不切到 writeUri——getMediaUri/重建出的规范 uri 不带任何新读权限（Critical#1）
                 val read = withContext(ioDispatcher) { repo.read(readBytes(uri)) }
                 if (loadedUri != uri) return@launch // 已被更新的 load/reset 取代
                 when (read) {
@@ -148,6 +192,9 @@ class EditViewModel(
     /** 回到入口页（放弃当前编辑会话）。 */
     fun reset() {
         loadedUri = null
+        loadedWriteUri = null
+        autoOverwritePermissionRequested = false
+        sessionCounter++
         _overwriteSupported.value = true
         _state.value = null
         _saveState.value = SaveState.Idle
@@ -247,6 +294,9 @@ class EditViewModel(
         viewModelScope.launch {
             try {
                 val written = withContext(ioDispatcher) { repo.write(ready.bytes, ready.original, ready.edited) }
+                // Important#3：命名走**授权读 uri**（loadedUri）——它带 picker/分享读授权，
+                // DISPLAY_NAME 查得到真名；writeUri 无读权限、file/第三方来源更查不到，
+                // 故 canOverwrite=false 时副本名仍为 `原名_副本`（不回归数字 id）。
                 val baseName = writer.displayNameOf(uri) ?: FALLBACK_NAME
                 val newName = CopyNaming.next(baseName, writer.existingNames())
                 // Live 内嵌型字节已含尾附视频（repo.write 已保动效）；双文件型按 spec 只产静态图
@@ -265,37 +315,52 @@ class EditViewModel(
 
     fun overwriteOriginal() {
         val ready = readyOrNull() ?: return
-        val uri = loadedUri ?: return
-        // Task14a 缺陷 1：来源不可覆盖（picker/分享只读 uri 归一失败）时不发起，就地给文案
+        val session = loadedUri ?: return
+        // Task14a 缺陷 1：来源无可信规范 writeUri 时不发起，就地给文案
         if (!_overwriteSupported.value) {
-            setResultInSession(uri, SaveState.Failed(OVERWRITE_UNSUPPORTED_MSG))
+            setResultInSession(session, SaveState.Failed(OVERWRITE_UNSUPPORTED_MSG))
             return
         }
         if (!startWorking()) return
         viewModelScope.launch {
             try {
                 val written = withContext(ioDispatcher) { repo.write(ready.bytes, ready.original, ready.edited) }
-                when (val outcome = writer.overwrite(uri, written)) {
-                    is SaveOutcome.Saved -> onSaved(uri, ready, written, outcome.uri)
-                    SaveOutcome.NeedsPermission ->
-                        setResultInSession(uri, SaveState.NeedsOverwritePermission)
+                // Critical#1：写只走规范 writeUri（原始 picker/分享授权 uri 覆盖必失败）
+                when (val outcome = writer.overwrite(loadedWriteUri ?: session, written)) {
+                    is SaveOutcome.Saved -> onSaved(session, ready, written, outcome.uri)
+                    SaveOutcome.NeedsPermission -> onNeedsOverwritePermission(session)
 
-                    is SaveOutcome.Failed -> setResultInSession(uri, SaveState.Failed(outcome.reason))
+                    is SaveOutcome.Failed -> setResultInSession(session, SaveState.Failed(outcome.reason))
                 }
             } catch (e: Exception) {
-                setResultInSession(uri, SaveState.Failed(e.message ?: "覆盖原图失败"))
+                setResultInSession(session, SaveState.Failed(e.message ?: "覆盖原图失败"))
             }
+        }
+    }
+
+    /**
+     * 进入 NeedsOverwritePermission 的唯一入口（Important#4）：置态 + **确定性**发一次性
+     * 授权请求事件（每会话至多一次，[autoOverwritePermissionRequested] 卡重入）。
+     * UI 侧不再靠观测 Working→NOP 跃变（StateFlow conflation 可能漏弹）。
+     */
+    private fun onNeedsOverwritePermission(session: Uri) {
+        setResultInSession(session, SaveState.NeedsOverwritePermission)
+        if (loadedUri == session && _state.value is EditState.Ready && !autoOverwritePermissionRequested) {
+            autoOverwritePermissionRequested = true
+            _overwritePermissionRequests.tryEmit(Unit)
         }
     }
 
     /**
      * 覆盖原图的系统授权 PendingIntent（spec §3.5，委托 [MediaStoreWriter.createWriteIntentFor]）：
      * UI 层拿它发起 IntentSender 授权，结果 OK 后重试一次 [overwriteOriginal]。
-     * 无会话（未 load / 已 reset）或平台不支持时 null。
+     * 无会话（未 load / 已 reset）或无可信 writeUri（不可覆盖来源）时 null——
+     * createWriteRequest 也必须用规范 media uri（Critical#1：授权对象与写入对象一致）。
      */
     suspend fun requestOverwritePermissionIntent(): PendingIntent? {
-        val uri = loadedUri ?: return null
-        return writer.createWriteIntentFor(uri)
+        if (loadedUri == null) return null
+        val writeUri = loadedWriteUri ?: return null
+        return writer.createWriteIntentFor(writeUri)
     }
 
     private fun readyOrNull(): EditState.Ready? = _state.value as? EditState.Ready
@@ -385,7 +450,11 @@ class EditViewModel(
 
     companion object {
         private const val FALLBACK_NAME = "photo.jpg"
-        private const val OVERWRITE_UNSUPPORTED_MSG = "该来源无法覆盖原图，请用另存为副本"
+
+        /**
+         * 不可覆盖来源的统一文案（评审 #7：唯一定义处，SaveSheet/VM 共用，不再两处字面量）。
+         */
+        internal const val OVERWRITE_UNSUPPORTED_MSG = "该来源无法覆盖原图，请用另存为副本"
         private const val GPS_TOLERANCE = 0.001 // ≈111 m，覆盖 Float 精度 + DMS 有理化损耗
         private const val RATIONAL_TOLERANCE = 0.001 // 覆盖 /10000 有理化与十进制往返损耗
 

@@ -16,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.core.content.IntentCompat
+import androidx.lifecycle.viewModelScope
 import com.photoedit.app.ui.edit.EditScreen
 import com.photoedit.app.ui.edit.EditViewModel
 import com.photoedit.app.ui.entry.EntryScreen
@@ -65,10 +66,15 @@ class MainActivity : ComponentActivity() {
                     null
                 }
                 if (uri != null) {
-                    // Task14a 缺陷 1：分享 EXTRA_STREAM 若已是 images/media/<id> 归一后走覆盖；
-                    // file uri / 归一失败则只读降级（覆盖入口禁用，spec §3.5/§4）
-                    val canonical = resolveCanonicalMediaUri(this, uri)
-                    editViewModel.load(canonical.uri, canonical.canOverwrite)
+                    // Task14a 修复轮1（读写分离）：分享 EXTRA_STREAM 原样作为**授权读 uri**
+                    // 进入编辑/命名链路；另在 IO 协程内解析规范 writeUri（仅 media authority
+                    // 可信来源才有，Critical#2 门）供覆盖使用。file uri / 第三方 authority /
+                    // 解析失败 → writeUri=null，覆盖入口禁用（spec §3.5/§4），编辑与副本照常。
+                    // 归一的 binder 查询移出主线程（评审 #6）：挂在 VM 协程作用域内。
+                    editViewModel.viewModelScope.launch {
+                        val canonical = resolveCanonicalMediaUri(this@MainActivity, uri)
+                        editViewModel.load(canonical.readUri, canonical.writeUri)
+                    }
                 } else {
                     toastUnsupportedShare()
                 }
@@ -109,7 +115,7 @@ private fun AppNav(viewModel: EditViewModel) {
         if (result.resultCode == Activity.RESULT_OK) viewModel.overwriteOriginal()
     }
     if (state == null) {
-        EntryScreen(onPick = { canonical -> viewModel.load(canonical.uri, canonical.canOverwrite) })
+        EntryScreen(onPick = { canonical -> viewModel.load(canonical.readUri, canonical.writeUri) })
     } else {
         EditScreen(
             vm = viewModel,

@@ -120,15 +120,31 @@ fun EditScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showSaveSheet by remember { mutableStateOf(false) }
     var showLocationSheet by remember { mutableStateOf(false) }
-    // Task14a 缺陷 2：系统授权弹窗至多自动发起一次——remember 按 uri 会话作用域，切图重置。
-    var permissionAutoConsumed by remember(vm.currentUri) { mutableStateOf(false) }
-    var previousSaveState by remember(vm.currentUri) { mutableStateOf<SaveState>(SaveState.Idle) }
+    // 会话 key = uri + sessionToken（评审 #8）：同一 uri 二次分享/选择时 uri 相等，
+    // 靠 VM 自增令牌重置消费位，避免 remember key 不变导致的陈旧"已消费"状态。
+    val sessionKey = vm.currentUri to vm.sessionToken
+    // Task14a 缺陷 2：系统授权弹窗至多自动发起一次——remember 按会话作用域，切图/重分享重置。
+    var permissionAutoConsumed by remember(sessionKey) { mutableStateOf(false) }
+    var previousSaveState by remember(sessionKey) { mutableStateOf<SaveState>(SaveState.Idle) }
     // 定位的权限 launcher + 取位协程挂在本页作用域：系统授权弹窗打断地点面板时结果不丢
     val locationRequester = rememberLocationRequester(vm) { showLocationSheet = false }
 
     // 一次性事件（非法输入等，无 replay）→ snackbar
     LaunchedEffect(Unit) {
         vm.events.collect { snackbarHostState.showSnackbar(it) }
+    }
+
+    // Important#4 主防线：VM 进入 NOP 时确定性发出授权请求事件（不依赖 UI 恰好观测到
+    // Working→NOP 跃变，StateFlow conflation 可能吞掉首个 NOP）。与下方跃变兜底共用
+    // permissionAutoConsumed，两条路径同帧到达也只弹一次。
+    LaunchedEffect(Unit) {
+        vm.overwritePermissionRequests.collect {
+            showSaveSheet = true
+            if (!permissionAutoConsumed) {
+                permissionAutoConsumed = true
+                onLaunchOverwritePermission()
+            }
+        }
     }
 
     LaunchedEffect(saveState) {
@@ -141,8 +157,8 @@ fun EditScreen(
 
             is SaveState.NeedsOverwritePermission -> {
                 showSaveSheet = true // 面板内展示"改为另存副本"一键路径
-                // 只在 Working→NOP 的一次跃变且本会话未自动发起过时拉起系统写授权，避免
-                // NOP→Working→NOP 重入循环 / 配置变更后重复弹窗；其余靠面板显式动作兜底。
+                // 次防线（保留）：Working→NOP 跃变且本会话未消费过时补发一次；
+                // 主防线是上面的 VM 事件，这里只兜事件订阅前的漏网场景。
                 if (shouldRelaunchOverwritePermission(previousSaveState, s, permissionAutoConsumed)) {
                     permissionAutoConsumed = true
                     onLaunchOverwritePermission() // 拉起系统写授权，OK 后 AppNav 重试 overwrite
