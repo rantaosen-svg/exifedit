@@ -161,14 +161,17 @@ class ExifRepository {
             val v = edited.model
             if (v != null) ei.setAttribute(ExifInterface.TAG_MODEL, v) else deletions.ifd0 += ExifTagRemover.TIFF_TAG_MODEL
         }
+        // FNumber/ExposureTime 属 androidx sTagSetForCompatibility 集合：setAttribute 对它们
+        // 整串走 Double.parseDouble（内部再经 Rational(double) 转有理数），传 "N/D" 分数字符串
+        // 会被判 "Invalid value" 静默丢弃（1.3.7 字节码实证）；必须写十进制字符串。
         if (MetadataField.F_NUMBER in changed) {
             val v = edited.fNumber
-            if (v != null) ei.setAttribute(ExifInterface.TAG_F_NUMBER, rationalString(v))
+            if (v != null) ei.setAttribute(ExifInterface.TAG_F_NUMBER, decimalString(v))
             else deletions.exif += ExifTagRemover.TIFF_TAG_FNUMBER
         }
         if (MetadataField.SHUTTER in changed) {
             val v = edited.shutterSeconds
-            if (v != null) ei.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, rationalString(v))
+            if (v != null) ei.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, decimalString(v))
             else deletions.exif += ExifTagRemover.TIFF_TAG_EXPOSURE_TIME
         }
         if (MetadataField.ISO in changed) {
@@ -210,7 +213,10 @@ class ExifRepository {
         return "${dms.degrees}/1,${dms.minutes}/1,$secNumerator/10000"
     }
 
-    /** double → 有理数字符串；快门等倒数优先 "1/n" 常规表示，否则放大为 /10000。 */
+    /** double → 十进制字符串（FNumber/ExposureTime 兼容集标签专用；Kotlin toString 不随 locale 变化）。 */
+    internal fun decimalString(v: Double): String = v.toString()
+
+    /** double → 有理数字符串（仅用于非兼容集标签，如 FocalLength/GPS 海拔）；小于 1 优先 "1/n" 表示，否则放大为 /10000。 */
     internal fun rationalString(v: Double): String {
         if (v <= 0.0) return "0/1"
         if (v < 1.0) {
