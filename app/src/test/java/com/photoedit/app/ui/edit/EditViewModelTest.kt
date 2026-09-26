@@ -126,7 +126,15 @@ class EditViewModelTest {
             return overwriteOutcome
         }
 
-        override suspend fun createWriteIntentFor(uri: Uri): PendingIntent? = null
+        var writeIntentCalls = 0
+        var lastWriteIntentUri: Uri? = null
+
+        /** JVM 无法构造真 PendingIntent（final 类），返回 null 足够断言委托目标。 */
+        override suspend fun createWriteIntentFor(uri: Uri): PendingIntent? {
+            writeIntentCalls++
+            lastWriteIntentUri = uri
+            return null
+        }
 
         companion object {
             val savedUri = FakeUri("content://media/external/images/media/42")
@@ -524,5 +532,39 @@ class EditViewModelTest {
         vm.reset()
         assertEquals(null, vm.state.value)
         assertEquals(SaveState.Idle, vm.saveState.value)
+        assertEquals(null, vm.currentUri)
+    }
+
+    // ---- Task 13 UI 支撑：currentUri / requestOverwritePermissionIntent ----
+
+    @Test
+    fun `currentUri 跟随 load 更新`() = runTest {
+        val vm = viewModel()
+        assertEquals(null, vm.currentUri)
+        vm.load(uri)
+        assertEquals(uri, vm.currentUri)
+        vm.load(uri2)
+        assertEquals(uri2, vm.currentUri)
+    }
+
+    @Test
+    fun `requestOverwritePermissionIntent 委托 writer 并携带当前会话 uri`() = runTest {
+        val writer = FakeWriter()
+        val vm = viewModel(writer = writer)
+        vm.load(uri)
+        assertEquals(null, vm.requestOverwritePermissionIntent()) // fake 返回 null，断言的是委托目标
+        assertEquals(1, writer.writeIntentCalls)
+        assertEquals(uri, writer.lastWriteIntentUri)
+    }
+
+    @Test
+    fun `未加载或 reset 后 requestOverwritePermissionIntent 返回 null 且不触达 writer`() = runTest {
+        val writer = FakeWriter()
+        val vm = viewModel(writer = writer)
+        assertEquals(null, vm.requestOverwritePermissionIntent())
+        vm.load(uri)
+        vm.reset()
+        assertEquals(null, vm.requestOverwritePermissionIntent())
+        assertEquals(0, writer.writeIntentCalls)
     }
 }

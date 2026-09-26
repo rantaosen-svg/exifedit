@@ -1,5 +1,6 @@
 package com.photoedit.app.ui.edit
 
+import android.app.PendingIntent
 import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
@@ -102,6 +103,9 @@ class EditViewModel(
     val events: SharedFlow<String> = _events.asSharedFlow()
 
     private var loadedUri: Uri? = null
+
+    /** 当前会话的图片 uri（reset/未选图时 null）：编辑页预览用，UI 不必自行持有 load 会话。 */
+    val currentUri: Uri? get() = loadedUri
 
     // region load
 
@@ -234,6 +238,16 @@ class EditViewModel(
                 setResultInSession(uri, SaveState.Failed(e.message ?: "覆盖原图失败"))
             }
         }
+    }
+
+    /**
+     * 覆盖原图的系统授权 PendingIntent（spec §3.5，委托 [MediaStoreWriter.createWriteIntentFor]）：
+     * UI 层拿它发起 IntentSender 授权，结果 OK 后重试一次 [overwriteOriginal]。
+     * 无会话（未 load / 已 reset）或平台不支持时 null。
+     */
+    suspend fun requestOverwritePermissionIntent(): PendingIntent? {
+        val uri = loadedUri ?: return null
+        return writer.createWriteIntentFor(uri)
     }
 
     private fun readyOrNull(): EditState.Ready? = _state.value as? EditState.Ready
