@@ -314,10 +314,15 @@ private fun SearchSection(
                 Text(if (searching) "搜索中…" else "搜索", color = MaterialTheme.colorScheme.primary)
             }
         }
+        // 先捕获成稳定局部 val：LazyColumn 的内容 lambda 是延迟执行的（快照应用阶段重算派生状态时
+        // 会重跑），若直接在里面读可空的 `results` 状态，用户改输入把 results 置 null 后 `!!` 会 NPE
+        // 崩主线程（真机复现：搜索出结果后编辑输入框 → LocationSheet.kt:330 NPE）。捕获后 lambda 锁
+        // 定非空快照，置 null 只影响下一次组合（走 results==null 分支显示提示）。
+        val currentResults = results
         when {
             searching -> HintLine("正在请求地点列表…")
-            results == null -> HintLine("Photon 地理编码（免 key）。无网络时可切到“手动输入”")
-            results!!.isEmpty() -> Text(
+            currentResults == null -> HintLine("Photon 地理编码（免 key）。无网络时可切到“手动输入”")
+            currentResults.isEmpty() -> Text(
                 "未找到地点。网络不可用或无结果时，请改用“手动输入”经纬度",
                 style = MaterialTheme.typography.bodySmall,
                 color = IosDanger,
@@ -327,7 +332,7 @@ private fun SearchSection(
             else -> LazyColumn(Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
                 // key 追加 index（评审 #8）：接口返回两条同名同坐标的候选时纯内容 key 会重复并崩溃
                 itemsIndexed(
-                    results!!,
+                    currentResults,
                     key = { index, place -> "${place.displayName}@${place.latitude},${place.longitude}#$index" },
                 ) { _, place ->
                     PlaceResultRow(place, onClick = { onPick(place) })
