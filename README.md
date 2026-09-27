@@ -1,4 +1,4 @@
-# PhotoEdit
+# ExifEdit
 
 一款单功能的安卓相册 EXIF 编辑器：修改照片的拍摄时间、拍摄地点与常用相机参数，保存回系统相册后，各厂商相册（realme / 荣耀 / 小米 / 三星等）能正确显示新的时间与地点。界面走苹果风格（分组圆角卡片、大标题、克制配色）。
 
@@ -9,7 +9,7 @@
 - **改常用相机字段**：设备型号（显示 Make、可改 Model）、光圈 FNumber、快门 ExposureTime、ISO、焦距 FocalLength；未修改字段（含 Orientation）一律原样保留。
 - **保存**：另存副本（默认，插入 `Pictures/`，命名 `原名_副本.jpg`，重名递增）或覆盖原图（`createWriteRequest` 系统授权后直写）。
 - **动态照片（Live 图）**：内嵌型（Google / 三星 Motion Photo v2）EXIF 重写后自动修正 XMP 偏移，副本与覆盖都保持动效。
-- **入口两个**：app 内系统 Photo Picker 选图；系统相册"分享 → PhotoEdit"。
+- **入口两个**：app 内系统 Photo Picker 选图；系统相册"分享 → ExifEdit"。
 - **仅 JPEG、仅单张**：非 JPEG 入口即提示，`ACTION_SEND_MULTIPLE` 提示只支持单张。
 
 ## 这版不做什么
@@ -63,8 +63,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - [ ] 分享入口 → 从系统相册分享一张 JPEG 可进入编辑
 - [ ] 非 JPEG → 入口提示不支持
 - [ ] （Task 14a）Photo Picker 选图后另存副本 → 副本名为**真实原文件名**加 `_副本`（非数字 id / FALLBACK 名）
-- [ ] （Task 14a）覆盖相册中来历不明的外部原图 → 系统"允许 PhotoEdit 编辑此文件?"授权弹窗外观与流程正常；拒绝后可转另存副本
-- [ ] （Task 14a）从系统相册发起真实"分享 → PhotoEdit" → 编辑 → 覆盖/副本全链路成功
+- [ ] （Task 14a）覆盖相册中来历不明的外部原图 → 系统"允许 ExifEdit 编辑此文件?"授权弹窗外观与流程正常；拒绝后可转另存副本
+- [ ] （Task 14a）从系统相册发起真实"分享 → ExifEdit" → 编辑 → 覆盖/副本全链路成功
 - [ ] （Task 14a）同一张照片二次分享进入 → UI 状态正确重建，不残留上一次的编辑内容或弹窗循环
 
 任何一项不过 → 记录 issue 回对应任务修复。

@@ -44,7 +44,7 @@ class OkHttpFetcher : HttpFetcher {
     }
 
     companion object {
-        const val USER_AGENT = "PhotoEdit/1.0"
+        const val USER_AGENT = "ExifEdit/1.0"
     }
 }
 

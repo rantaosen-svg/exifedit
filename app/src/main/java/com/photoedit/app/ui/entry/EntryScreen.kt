@@ -63,7 +63,7 @@ fun EntryScreen(onPick: (CanonicalMediaUri) -> Unit) {
         ) {
             Spacer(Modifier.height(48.dp))
             Text(
-                text = "PhotoEdit",
+                text = "ExifEdit",
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground,
             )
