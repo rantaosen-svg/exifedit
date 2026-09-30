@@ -14,7 +14,9 @@ import com.photoedit.app.data.GeocoderService
 import com.photoedit.app.data.MediaStoreWriter
 import com.photoedit.app.data.OkHttpFetcher
 import com.photoedit.app.data.PhotonGeocoder
+import com.photoedit.app.data.RecentPlaceStore
 import com.photoedit.app.data.SaveOutcome
+import com.photoedit.app.data.SharedPreferencesStore
 import com.photoedit.app.domain.CopyNaming
 import com.photoedit.app.domain.GpsConvert
 import com.photoedit.app.domain.GpsCoordinates
@@ -90,6 +92,8 @@ class EditViewModel(
     private val geocoder: GeocoderService,
     private val readBytes: (Uri) -> ByteArray,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    // 改动 3：尾加默认参（null = 不记最近地点，既有 42 条 VM 测构造不变）
+    private val recentStore: RecentPlaceStore? = null,
 ) : ViewModel() {
 
     /** null = 尚未选图（入口页）；Loading/Unsupported/Error/Ready = 编辑页（Task 11 评审 A）。 */
@@ -284,6 +288,26 @@ class EditViewModel(
      */
     fun reportIssue(msg: String) {
         _events.tryEmit(msg)
+    }
+
+    // endregion
+
+    // region 最近地点（改动 3：只记搜索选中，手动/定位不记——用户拍板）
+
+    /** init 时从存储读存量；无 store（测试/降级）恒空。 */
+    private val _recentPlaces = MutableStateFlow(recentStore?.all() ?: emptyList())
+    val recentPlaces: StateFlow<List<GeoPlace>> = _recentPlaces.asStateFlow()
+
+    /** 记录一条搜索选中的地点并持久化；null store 时 no-op。 */
+    fun recordRecentPlace(place: GeoPlace) {
+        val store = recentStore ?: return
+        _recentPlaces.value = store.record(place)
+    }
+
+    /** 清空最近地点（存储 + flow）；null store 时仅复位 flow（恒空，无副作用）。 */
+    fun clearRecentPlaces() {
+        recentStore?.clear()
+        _recentPlaces.value = emptyList()
     }
 
     // endregion
@@ -513,6 +537,8 @@ class EditViewModel(
                         app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                             ?: throw IOException("无法打开图片输入流")
                     },
+                    // 改动 3：最近地点持久化（SharedPreferences，见 data.RecentPlaceStore）
+                    recentStore = RecentPlaceStore(SharedPreferencesStore(app)),
                 )
             }
         }

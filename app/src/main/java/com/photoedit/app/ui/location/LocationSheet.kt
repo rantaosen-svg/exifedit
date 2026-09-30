@@ -14,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,8 +23,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
@@ -32,6 +36,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -92,11 +97,23 @@ fun LocationSheet(
 ) {
     val state by vm.state.collectAsState()
     val ready = state as? EditState.Ready ?: return
+    val recentPlaces by vm.recentPlaces.collectAsState()
     var tab by remember { mutableStateOf(LocationTab.Search) }
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = IosSurface) {
         Column(Modifier.fillMaxWidth()) {
             CurrentPlaceHeader(ready.edited.placeName, ready.edited.gps)
+            // 改动 3：最近三次搜索选中，胶囊 chip 一键复用
+            if (recentPlaces.isNotEmpty()) {
+                RecentPlacesSection(
+                    places = recentPlaces,
+                    onPick = { place ->
+                        applySearchPick(vm, place)
+                        onDismiss()
+                    },
+                    onClear = { vm.clearRecentPlaces() },
+                )
+            }
             TabRow(
                 selectedTabIndex = tab.ordinal,
                 containerColor = IosSurface,
@@ -255,6 +272,57 @@ private fun CurrentPlaceHeader(placeName: String?, gps: GpsCoordinates?) {
                 style = MaterialTheme.typography.bodySmall,
                 color = IosSecondaryLabel,
             )
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+// ---- 最近使用 chips（改动 3） ----
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RecentPlacesSection(
+    places: List<GeoPlace>,
+    onPick: (GeoPlace) -> Unit,
+    onClear: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "最近使用",
+                style = MaterialTheme.typography.bodySmall,
+                color = IosSecondaryLabel,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onClear) {
+                Text("清空", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            places.forEach { place ->
+                Surface(
+                    shape = RoundedCornerShape(percent = 50),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.clickable { onPick(place) },
+                ) {
+                    Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp).widthIn(max = 240.dp)) {
+                        Text(
+                            place.displayName,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            formatCoords(place.latitude, place.longitude),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = IosSecondaryLabel,
+                        )
+                    }
+                }
+            }
         }
         Spacer(Modifier.height(8.dp))
     }
@@ -461,6 +529,8 @@ private fun ErrorLine(text: String) {
 internal fun applySearchPick(vm: EditViewModel, place: GeoPlace) {
     vm.setPlaceName(place.displayName)
     vm.setGps(place.latitude, place.longitude)
+    // 改动 3：只有搜索选中路径记最近地点（chips 点击同样经此路径，视为再次搜索选中）
+    vm.recordRecentPlace(place)
 }
 
 /**

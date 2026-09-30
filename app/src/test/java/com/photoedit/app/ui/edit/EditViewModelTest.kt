@@ -192,7 +192,8 @@ class EditViewModelTest {
         geocoder: GeocoderService = FakeGeocoder(),
         readBytes: (Uri) -> ByteArray = { jpegBytes },
         io: CoroutineDispatcher = UnconfinedTestDispatcher(), // 同步执行 IO，保持既有断言时序
-    ) = EditViewModel(repo, writer, geocoder, readBytes, io)
+        recentStore: com.photoedit.app.data.RecentPlaceStore? = null,
+    ) = EditViewModel(repo, writer, geocoder, readBytes, io, recentStore)
 
     /** 收集 events（SharedFlow 无 replay，需先挂订阅）。 */
     private fun kotlinx.coroutines.test.TestScope.collectEvents(vm: EditViewModel): List<String> {
@@ -844,5 +845,51 @@ class EditViewModelTest {
         vm.reset()
         assertEquals(null, vm.requestOverwritePermissionIntent())
         assertEquals(0, writer.writeIntentCalls)
+    }
+
+    // ---- 最近地点（改动 3）----
+
+    private class MemKv(var value: String? = null) : com.photoedit.app.data.KeyValueStore {
+        var writeCalls = 0
+        override fun read(): String? = value
+        override fun write(value: String?) {
+            this.value = value
+            writeCalls++
+        }
+    }
+
+    @Test
+    fun `recordRecentPlace 更新 flow 且持久化到 store init 时读取存量`() = runTest {
+        val kv = MemKv()
+        val existing = com.photoedit.app.data.GeoPlace("东京, 关东地方", 35.68, 139.69)
+        com.photoedit.app.data.RecentPlaceStore(kv).record(existing) // 预置存量
+        val vm = viewModel(recentStore = com.photoedit.app.data.RecentPlaceStore(kv))
+        assertEquals(listOf(existing), vm.recentPlaces.value) // init 读 store
+        val picked = com.photoedit.app.data.GeoPlace("外滩, 上海市", 31.2397, 121.4998)
+        vm.recordRecentPlace(picked)
+        assertEquals(listOf(picked, existing), vm.recentPlaces.value)
+        assertEquals(
+            listOf(picked, existing),
+            com.photoedit.app.data.RecentPlaceStore(kv).all(), // 已持久化（新实例重读）
+        )
+    }
+
+    @Test
+    fun `无 store 时 record 与 clear 为 no-op 不崩且 flow 恒空`() = runTest {
+        val vm = viewModel() // recentStore 默认 null
+        vm.recordRecentPlace(com.photoedit.app.data.GeoPlace("外滩", 31.2, 121.5))
+        assertEquals(emptyList<com.photoedit.app.data.GeoPlace>(), vm.recentPlaces.value)
+        vm.clearRecentPlaces()
+        assertEquals(emptyList<com.photoedit.app.data.GeoPlace>(), vm.recentPlaces.value)
+    }
+
+    @Test
+    fun `clearRecentPlaces 清空 flow 与存储`() = runTest {
+        val kv = MemKv()
+        val vm = viewModel(recentStore = com.photoedit.app.data.RecentPlaceStore(kv))
+        vm.recordRecentPlace(com.photoedit.app.data.GeoPlace("外滩", 31.2, 121.5))
+        vm.clearRecentPlaces()
+        assertEquals(emptyList<com.photoedit.app.data.GeoPlace>(), vm.recentPlaces.value)
+        assertEquals(null, kv.value)
     }
 }
