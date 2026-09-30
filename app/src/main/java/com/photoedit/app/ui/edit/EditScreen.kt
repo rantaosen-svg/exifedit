@@ -232,7 +232,14 @@ fun EditScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         item { PreviewCard(uri = uri, orientation = s.edited.orientation) }
-                        item { TakenAtCard(takenAt = s.edited.takenAt, onPicked = { vm.setTakenAt(it) }) }
+                        item {
+                            TakenAtCard(
+                                takenAt = s.edited.takenAt,
+                                onPicked = { vm.setTakenAt(it) },
+                                // 改动 2：一键取当前时间，不打开选择器（setter 已有 VM 测）
+                                onUseNow = { vm.setTakenAt(LocalDateTime.now()) },
+                            )
+                        }
                         item {
                             PlaceCard(
                                 placeName = s.edited.placeName,
@@ -339,7 +346,11 @@ internal fun GraphicsLayerScope.applyExifUpright(orientation: Int) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TakenAtCard(takenAt: LocalDateTime?, onPicked: (LocalDateTime) -> Unit) {
+private fun TakenAtCard(
+    takenAt: LocalDateTime?,
+    onPicked: (LocalDateTime) -> Unit,
+    onUseNow: () -> Unit,
+) {
     var showDateDialog by remember { mutableStateOf(false) }
     var showTimeDialog by remember { mutableStateOf(false) }
     var pickedDate by remember { mutableStateOf<LocalDate?>(null) }
@@ -348,6 +359,8 @@ private fun TakenAtCard(takenAt: LocalDateTime?, onPicked: (LocalDateTime) -> Un
         CardRow(
             title = "拍摄时间",
             value = takenAt?.format(TakenAtFormatter) ?: "未设置·点击添加",
+            actionLabel = "现在",
+            onAction = onUseNow,
             onClick = { showDateDialog = true },
         )
     }
@@ -566,7 +579,14 @@ private fun NumberFieldRow(
 // ---- 通用行 ----
 
 @Composable
-private fun CardRow(title: String, value: String, secondary: String? = null, onClick: () -> Unit) {
+private fun CardRow(
+    title: String,
+    value: String,
+    secondary: String? = null,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -586,6 +606,11 @@ private fun CardRow(title: String, value: String, secondary: String? = null, onC
             if (secondary != null) {
                 Text(secondary, style = MaterialTheme.typography.bodySmall, color = IosSecondaryLabel)
             }
+        }
+        // 行内快捷动作（改动 2：时间卡"现在"按钮）：放在 chevron 之前；
+        // clickable 子节点在手势竞争下优先于父行 clickable，点击不会误开选择器
+        if (actionLabel != null && onAction != null) {
+            TextButton(onClick = onAction) { Text(actionLabel) }
         }
         Spacer(Modifier.width(8.dp))
         Text("›", style = MaterialTheme.typography.titleMedium, color = IosSecondaryLabel)
