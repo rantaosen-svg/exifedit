@@ -4,13 +4,13 @@
 
 ## 功能
 
-- **改拍摄时间**：`DateTimeOriginal` + `OffsetTimeOriginal`，日期 + 时间选择器。
-- **改拍摄地点**：三选一 —— 搜索地名（Photon 主 / Nominatim 兜底）、用当前定位（系统 LocationManager，不依赖谷歌服务）、手动输入经纬度（纬 ±90 / 经 ±180 校验）；支持"清除地点"（整棵 GPS IFD 物理删除）。
+- **改拍摄时间**：`DateTimeOriginal` + `OffsetTimeOriginal`，日期 + 时间选择器；一键"现在"直接写入当前时刻。
+- **改拍摄地点**：三选一 —— 搜索地名（Photon 主 / Nominatim 兜底）、用当前定位（系统 LocationManager，不依赖谷歌服务）、手动输入经纬度（纬 ±90 / 经 ±180 校验）；支持"清除地点"（整棵 GPS IFD 物理删除）。搜索选过的地点记入"最近使用"（最多 3 条、本机持久化、一键清空），面板顶部点胶囊一步复用。
 - **改常用相机字段**：设备型号（显示 Make、可改 Model）、光圈 FNumber、快门 ExposureTime、ISO、焦距 FocalLength；未修改字段（含 Orientation）一律原样保留。
 - **保存**：另存副本（默认，插入 `Pictures/`，命名 `原名_副本.jpg`，重名递增）或覆盖原图（`createWriteRequest` 系统授权后直写）。
 - **动态照片（Live 图）**：内嵌型（Google / 三星 Motion Photo v2）EXIF 重写后自动修正 XMP 偏移，副本与覆盖都保持动效。
-- **入口两个**：app 内系统 Photo Picker 选图；系统相册"分享 → ExifEdit"。
-- **仅 JPEG、仅单张**：非 JPEG 入口即提示，`ACTION_SEND_MULTIPLE` 提示只支持单张。
+- **入口两个**：app 内系统 Photo Picker 选图；系统相册"分享 → ExifEdit"（接受任意图片类型的分享，按文件内容判定格式）。
+- **仅 JPEG、仅单张**：非 JPEG（HEIC/PNG 等）进编辑页提示"暂不支持该格式"；多张分享提示只支持单张。
 
 ## 这版不做什么
 
