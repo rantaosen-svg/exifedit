@@ -23,8 +23,9 @@
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/jpeg" />
-                <data android:mimeType="image/jpg" />
+                <!-- 改动 1：按内容判定，入口接受任何 image/* 分享（jpeg/jpg 被其覆盖）；
+                     非 JPEG 内容由编辑页 Unsupported 状态给正确文案 -->
+                <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
     </application>

@@ -17,6 +17,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.viewModelScope
+import com.photoedit.app.ui.ShareIntake
+import com.photoedit.app.ui.classifyShareIntake
 import com.photoedit.app.ui.edit.EditScreen
 import com.photoedit.app.ui.edit.EditViewModel
 import com.photoedit.app.ui.entry.EntryScreen
@@ -49,50 +51,52 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 分享进入：仅接受单张 image/jpeg|jpg 的 ACTION_SEND；
-     * 多图或其他 mime 类型 Toast 提示并停留在入口页。
+     * 分享进入（改动 1）：按内容判定而非精确 MIME（根因：相册分享常声明 image 通配、
+     * 全通配、image/heic，单图也可能走 SEND_MULTIPLE，旧版全被误拒）。判定逻辑抽为纯函数
+     * [classifyShareIntake]（JVM 可测）；格式是否 JPEG 交给 ExifRepository.read 的
+     * SOI 魔数判定 → Unsupported 状态（编辑页已有"暂不支持该格式"UI），入口不再谎报。
      *
      * 处理后清空 intent.action（Task 11 评审 B）：Activity 重建时 getIntent() 返回
      * 同一 Intent 对象，若不消费会重放 Toast（及无谓的 load）。新分享走 onNewIntent，
      * 携带的是新 Intent 对象，不受影响。
      */
     private fun intakeShareIntent(intent: Intent?) {
-        val handled = when (intent?.action) {
-            Intent.ACTION_SEND -> {
-                val type = intent.type
-                val uri = if (type == "image/jpeg" || type == "image/jpg") {
-                    IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
-                } else {
-                    null
-                }
-                if (uri != null) {
-                    // Task14a 修复轮1（读写分离）：分享 EXTRA_STREAM 原样作为**授权读 uri**
-                    // 进入编辑/命名链路；另在 IO 协程内解析规范 writeUri（仅 media authority
-                    // 可信来源才有，Critical#2 门）供覆盖使用。file uri / 第三方 authority /
-                    // 解析失败 → writeUri=null，覆盖入口禁用（spec §3.5/§4），编辑与副本照常。
-                    // 归一的 binder 查询移出主线程（评审 #6）：挂在 VM 协程作用域内。
-                    editViewModel.viewModelScope.launch {
-                        val canonical = resolveCanonicalMediaUri(this@MainActivity, uri)
-                        editViewModel.load(canonical.readUri, canonical.writeUri)
-                    }
-                } else {
-                    toastUnsupportedShare()
-                }
-                true
-            }
-
-            Intent.ACTION_SEND_MULTIPLE -> {
-                toastUnsupportedShare()
-                true
-            }
-
-            else -> false
+        val action = intent?.action ?: return
+        val type = intent.type
+        // binder 查询仍留在主线程（与旧版一致，量级仅一次 parcel 解包）；异常兜底为空
+        val streamUri = if (action == Intent.ACTION_SEND) {
+            runCatching { IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java) }.getOrNull()
+        } else {
+            null
         }
-        if (handled) intent?.action = null
-    }
+        val streamUris = if (action == Intent.ACTION_SEND_MULTIPLE) {
+            runCatching { IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java) }
+                .getOrNull()?.filterIsInstance<Uri>()
+        } else {
+            null
+        }
+        when (val intake = classifyShareIntake(action, type, streamUri, streamUris)) {
+            is ShareIntake.LoadSingle -> {
+                // Task14a 修复轮1（读写分离）：分享 EXTRA_STREAM 原样作为**授权读 uri**
+                // 进入编辑/命名链路；另在 IO 协程内解析规范 writeUri（仅 media authority
+                // 可信来源才有，Critical#2 门）供覆盖使用。file uri / 第三方 authority /
+                // 解析失败 → writeUri=null，覆盖入口禁用（spec §3.5/§4），编辑与副本照常。
+                // 归一的 binder 查询移出主线程（评审 #6）：挂在 VM 协程作用域内。
+                editViewModel.viewModelScope.launch {
+                    val canonical = resolveCanonicalMediaUri(this@MainActivity, intake.uri)
+                    editViewModel.load(canonical.readUri, canonical.writeUri)
+                }
+            }
 
-    private fun toastUnsupportedShare() {
-        Toast.makeText(this, "暂支持单张 JPEG", Toast.LENGTH_SHORT).show()
+            ShareIntake.TooManyItems ->
+                Toast.makeText(this, "暂支持单张图片，请减少选择数量", Toast.LENGTH_SHORT).show()
+
+            ShareIntake.NoContent ->
+                Toast.makeText(this, "暂不支持该内容类型", Toast.LENGTH_SHORT).show()
+
+            ShareIntake.NotShare -> return // 非分享 action：不消费、不处理
+        }
+        intent.action = null
     }
 }
 
